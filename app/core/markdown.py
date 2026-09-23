@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import re
 from pathlib import Path
 
@@ -7,6 +8,32 @@ from pathlib import Path
 TAG_RE = re.compile(r"(?<!\w)#([A-Za-z0-9_/-]+)")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+?)(?:#([^\]|]+))?(?:\|([^\]]+))?\]\]")
+
+
+def render_markdown_to_html(markdown: str) -> str:
+    text = html.escape(markdown)
+    text = re.sub(r"^### (.*)$", r"<h3>\1</h3>", text, flags=re.MULTILINE)
+    text = re.sub(r"^## (.*)$", r"<h2>\1</h2>", text, flags=re.MULTILINE)
+    text = re.sub(r"^# (.*)$", r"<h1>\1</h1>", text, flags=re.MULTILINE)
+    text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
+    text = re.sub(r"\*(.+?)\*", r"<em>\1</em>", text)
+    text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+    text = re.sub(r"\[\[([^\]|#]+?)(?:#([^\]|]+))?(?:\|([^\]]+))?\]\]", r"<a href='\1'>\3\1</a>", text)
+
+    blocks: list[str] = []
+    for paragraph in re.split(r"\n\s*\n", text):
+        if not paragraph.strip():
+            continue
+        if paragraph.lstrip().startswith("<h") or paragraph.lstrip().startswith("<ul>") or paragraph.lstrip().startswith("<ol>") or paragraph.lstrip().startswith("<pre>"):
+            blocks.append(paragraph)
+            continue
+        if paragraph.strip().startswith("- "):
+            items = "\n".join(f"<li>{item.strip()}</li>" for item in paragraph.splitlines() if item.strip())
+            blocks.append(f"<ul>{items}</ul>")
+            continue
+        blocks.append(f"<p>{paragraph.strip()}</p>")
+
+    return "\n".join(blocks)
 
 
 def extract_frontmatter(text: str) -> tuple[dict[str, str], str]:
