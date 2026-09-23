@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
+from urllib.parse import unquote
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QUrl, Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -86,6 +88,10 @@ class MainWindow(QMainWindow):
 
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
+        self.title_input = QLineEdit()
+        self.title_input.setPlaceholderText("Note title")
+        self.title_input.textChanged.connect(self._refresh_preview)
+
         self.editor = QTextEdit()
         self.editor.setPlaceholderText("Write a note in Markdown...")
         self.editor.setMinimumHeight(340)
@@ -93,11 +99,35 @@ class MainWindow(QMainWindow):
 
         self.preview = QTextBrowser()
         self.preview.setOpenExternalLinks(False)
+        self.preview.anchorClicked.connect(self._on_preview_link_clicked)
         self.preview.setHtml("<p>Preview will appear here.</p>")
         self.preview.setMinimumHeight(220)
 
+        self.backlinks_list = QListWidget()
+        self.backlinks_list.setMinimumHeight(100)
+        self.backlinks_list.itemDoubleClicked.connect(self._on_list_item_open)
+
+        self.outgoing_list = QListWidget()
+        self.outgoing_list.setMinimumHeight(100)
+        self.outgoing_list.itemDoubleClicked.connect(self._on_list_item_open)
+
+        self.unresolved_list = QListWidget()
+        self.unresolved_list.setMinimumHeight(100)
+        self.unresolved_list.itemDoubleClicked.connect(self._on_list_item_open)
+
+        self.backlinks_label = QLabel("Backlinks")
+        self.outgoing_label = QLabel("Outgoing")
+        self.unresolved_label = QLabel("Unresolved")
+
+        right_layout.addWidget(self.title_input)
         right_layout.addWidget(self.editor, 2)
         right_layout.addWidget(self.preview, 1)
+        right_layout.addWidget(self.backlinks_label)
+        right_layout.addWidget(self.backlinks_list)
+        right_layout.addWidget(self.outgoing_label)
+        right_layout.addWidget(self.outgoing_list)
+        right_layout.addWidget(self.unresolved_label)
+        right_layout.addWidget(self.unresolved_list)
 
         splitter.addWidget(left_panel)
         splitter.addWidget(right_panel)
@@ -205,24 +235,138 @@ class MainWindow(QMainWindow):
         self.current_note_path = file_path
         content = file_path.read_text(encoding="utf-8", errors="replace")
         self.editor.setPlainText(content)
+        title = self.vault.notes.get(file_path.relative_to(self.vault.path).as_posix()).title if self.vault else file_path.stem
+        self.title_input.setText(title)
         self._refresh_preview()
+        self._refresh_related_lists()
         rel_path = file_path.relative_to(self.vault.path).as_posix() if self.vault else file_path.name
         self.status_label.setText(f"Open note: {rel_path}")
+
+    def _refresh_related_lists(self) -> None:
+        if self.vault is None or self.current_note_path is None:
+            return
+
+        rel_path = self.current_note_path.relative_to(self.vault.path).as_posix()
+        note = self.vault.notes.get(rel_path)
+        if note is None:
+            return
+
+        self.backlinks_list.clear()
+        self.outgoing_list.clear()
+        self.unresolved_list.clear()
+
+        for backlink in note.backlinks:
+            self.backlinks_list.addItem(backlink)
+        for outgoing in note.outgoing_links:
+            self.outgoing_list.addItem(outgoing)
+        for unresolved in note.unresolved_links:
+            self.unresolved_list.addItem(unresolved)
+
+        if self.backlinks_list.count() == 0:
+            self.backlinks_list.addItem("No backlinks")
+        if self.outgoing_list.count() == 0:
+            self.outgoing_list.addItem("No outgoing links")
+        if self.unresolved_list.count() == 0:
+            self.unresolved_list.addItem("No unresolved links")
+
+    def _on_list_item_open(self, item) -> None:
+        text = item.text()
+        if not text or text.startswith("No "):
+            return
+        self._open_note_from_reference(text)
+
+    def _on_preview_link_clicked(self, url: QUrl) -> None:
+        target = unquote(url.toString())
+        self._open_note_from_reference(target)
+
+    def _open_note_from_reference(self, reference: str) -> None:
+        if self.vault is None:
+            return
+        target = reference.strip()
+        if not target:
+            return
+        if "#" in target:
+            target = target.split("#", 1)[0]
+        resolved = self.vault.resolve_reference(target)
+        if resolved is None:
+            QMessageBox.information(self, "Unresolved link", f"No note matches: {target}")
+            return
+        self._open_note_file(self.vault.path / resolved)
 
     def _refresh_preview(self) -> None:
         content = self.editor.toPlainText()
         self.preview.setHtml(render_markdown_to_html(content))
+
+    def _rewrite_wikilink_references(self, old_name: str, new_name: str, content: str) -> str:
+        pattern = re.compile(r"\[\[([^\]|#]+?)(?:#([^\]|]+))?(?:\|([^\]]+))?\]\]")
+
+        def replace(match: re.Match[str]) -> str:
+            target = match.group(1).strip()
+            heading = match.group(2)
+            alias = match.group(3)
+            candidate_names = {old_name, f"{old_name}.md", old_name.replace(" ", "-")}
+            if target in candidate_names:
+                target = new_name
+            elif target.endswith(".md") and target[:-3] in candidate_names:
+                target = f"{new_name}.md"
+            replacement = f"[[{target}"
+            if heading:
+                replacement += f"#{heading}"
+            if alias is not None:
+                replacement += f"|{alias}"
+            replacement += "]]"
+            return replacement
+
+        return pattern.sub(replace, content)
+
+    def _rename_note_file_if_needed(self) -> None:
+        if self.current_note_path is None or self.vault is None:
+            return
+
+        current_name = self.current_note_path.name
+        desired_title = self.title_input.text().strip()
+        if not desired_title:
+            return
+
+        old_note_name = self.current_note_path.stem
+        safe_name = f"{desired_title}.md"
+        if safe_name == current_name:
+            return
+
+        destination = self.current_note_path.with_name(safe_name)
+        if destination.exists() and destination != self.current_note_path:
+            QMessageBox.warning(self, "Name conflict", f"A note named '{safe_name}' already exists in this folder.")
+            return
+
+        for relative_path, note in list(self.vault.notes.items()):
+            if relative_path == self.current_note_path.relative_to(self.vault.path).as_posix():
+                continue
+            updated_content = self._rewrite_wikilink_references(old_note_name, desired_title, note.content)
+            if updated_content != note.content:
+                path = self.vault.path / relative_path
+                path.write_text(updated_content, encoding="utf-8")
+
+        self.current_note_path.rename(destination)
+        self.current_note_path = destination
+
+        content = self.editor.toPlainText()
+        lines = content.splitlines()
+        if lines and lines[0].startswith("# "):
+            lines[0] = f"# {desired_title}"
+            self.editor.setPlainText("\n".join(lines))
 
     def save_current_note(self) -> None:
         if self.current_note_path is None:
             QMessageBox.information(self, "No note selected", "Select or create a note before saving.")
             return
 
+        self._rename_note_file_if_needed()
         self.current_note_path.write_text(self.editor.toPlainText(), encoding="utf-8")
         self.status_label.setText(f"Saved: {self.current_note_path.name}")
         if self.vault is not None:
             self.vault.refresh()
             self.populate_note_tree()
+            self._open_note_file(self.current_note_path)
 
     def new_note(self) -> None:
         if self.vault is None:

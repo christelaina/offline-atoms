@@ -66,24 +66,26 @@ class Vault:
             return None
 
         normalized_name = target.strip()
+        normalized_without_ext = normalized_name[:-3] if normalized_name.lower().endswith(".md") else normalized_name
+
         exact_candidates = [
-            key for key in self.notes if key.lower() == f"{normalized_name}.md".lower()
+            key for key in self.notes if key.lower() == normalized_name.lower() or key.lower() == f"{normalized_name}.md".lower()
         ]
         if exact_candidates:
             return exact_candidates[0]
 
         stem_matches = [
-            key for key in self.notes if key.lower().removesuffix(".md") == normalized_name.lower()
+            key for key in self.notes if key.lower().removesuffix(".md") == normalized_without_ext.lower()
         ]
         if stem_matches:
             return stem_matches[0]
 
         for key in self.notes:
-            if key.lower().removesuffix(".md") == normalized_name.lower().replace(" ", "-"):
+            if key.lower().removesuffix(".md") == normalized_without_ext.lower().replace(" ", "-"):
                 return key
 
         for key in self.notes:
-            if normalized_name.lower() in key.lower().removesuffix(".md"):
+            if normalized_without_ext.lower() in key.lower().removesuffix(".md"):
                 return key
 
         return None
