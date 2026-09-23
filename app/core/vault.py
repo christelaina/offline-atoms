@@ -33,17 +33,47 @@ class Vault:
             frontmatter=frontmatter,
         )
 
+    def _ensure_placeholder_note(self, target: str) -> str:
+        raw_target = target.strip()
+        if not raw_target:
+            raise ValueError("Target must not be empty")
+
+        if "#" in raw_target:
+            raw_target = raw_target.split("#", 1)[0]
+        if not raw_target:
+            raise ValueError("Target must not be empty")
+
+        if raw_target.lower().endswith(".md"):
+            relative_name = raw_target
+        else:
+            relative_name = f"{raw_target}.md"
+
+        candidate = self.path / relative_name
+        if not candidate.exists():
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            title = candidate.stem.replace("-", " ").strip() or "Untitled"
+            candidate.write_text(f"# {title}\n", encoding="utf-8")
+            self.notes[str(candidate.relative_to(self.path).as_posix())] = Note(
+                path=candidate,
+                title=title,
+                content=f"# {title}\n",
+                headings=[title],
+                wikilinks=[],
+                frontmatter={},
+            )
+
+        return str(candidate.relative_to(self.path).as_posix())
+
     def _rebuild_links(self) -> None:
         for note in self.notes.values():
             note.outgoing_links = []
             note.backlinks = []
             note.unresolved_links = []
 
-        for relative_path, note in self.notes.items():
+        for relative_path, note in list(self.notes.items()):
             for target in note.wikilinks:
                 resolved = self.resolve_reference(target)
                 if resolved is None:
-                    note.unresolved_links.append(target)
                     continue
                 note.outgoing_links.append(resolved)
 
@@ -88,7 +118,10 @@ class Vault:
             if normalized_without_ext.lower() in key.lower().removesuffix(".md"):
                 return key
 
-        return None
+        try:
+            return self._ensure_placeholder_note(normalized_name)
+        except ValueError:
+            return None
 
     def get_note_by_relative_path(self, relative_path: str) -> Note | None:
         return self.notes.get(relative_path)

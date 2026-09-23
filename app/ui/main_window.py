@@ -89,8 +89,8 @@ class MainWindow(QMainWindow):
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         self.title_input = QLineEdit()
-        self.title_input.setPlaceholderText("Note title")
-        self.title_input.textChanged.connect(self._refresh_preview)
+        self.title_input.setPlaceholderText("Markdown title is derived from # heading")
+        self.title_input.setVisible(False)
 
         self.editor = QTextEdit()
         self.editor.setPlaceholderText("Write a note in Markdown...")
@@ -111,13 +111,8 @@ class MainWindow(QMainWindow):
         self.outgoing_list.setMinimumHeight(100)
         self.outgoing_list.itemDoubleClicked.connect(self._on_list_item_open)
 
-        self.unresolved_list = QListWidget()
-        self.unresolved_list.setMinimumHeight(100)
-        self.unresolved_list.itemDoubleClicked.connect(self._on_list_item_open)
-
         self.backlinks_label = QLabel("Backlinks")
         self.outgoing_label = QLabel("Outgoing")
-        self.unresolved_label = QLabel("Unresolved")
 
         right_layout.addWidget(self.title_input)
         right_layout.addWidget(self.editor, 2)
@@ -126,8 +121,6 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.backlinks_list)
         right_layout.addWidget(self.outgoing_label)
         right_layout.addWidget(self.outgoing_list)
-        right_layout.addWidget(self.unresolved_label)
-        right_layout.addWidget(self.unresolved_list)
 
         splitter.addWidget(left_panel)
         splitter.addWidget(right_panel)
@@ -235,8 +228,10 @@ class MainWindow(QMainWindow):
         self.current_note_path = file_path
         content = file_path.read_text(encoding="utf-8", errors="replace")
         self.editor.setPlainText(content)
-        title = self.vault.notes.get(file_path.relative_to(self.vault.path).as_posix()).title if self.vault else file_path.stem
-        self.title_input.setText(title)
+        if self.vault is not None:
+            note = self.vault.notes.get(file_path.relative_to(self.vault.path).as_posix())
+            if note is not None:
+                self.title_input.setText(note.title)
         self._refresh_preview()
         self._refresh_related_lists()
         rel_path = file_path.relative_to(self.vault.path).as_posix() if self.vault else file_path.name
@@ -253,21 +248,16 @@ class MainWindow(QMainWindow):
 
         self.backlinks_list.clear()
         self.outgoing_list.clear()
-        self.unresolved_list.clear()
 
         for backlink in note.backlinks:
             self.backlinks_list.addItem(backlink)
         for outgoing in note.outgoing_links:
             self.outgoing_list.addItem(outgoing)
-        for unresolved in note.unresolved_links:
-            self.unresolved_list.addItem(unresolved)
 
         if self.backlinks_list.count() == 0:
             self.backlinks_list.addItem("No backlinks")
         if self.outgoing_list.count() == 0:
             self.outgoing_list.addItem("No outgoing links")
-        if self.unresolved_list.count() == 0:
-            self.unresolved_list.addItem("No unresolved links")
 
     def _on_list_item_open(self, item) -> None:
         text = item.text()
@@ -289,7 +279,7 @@ class MainWindow(QMainWindow):
             target = target.split("#", 1)[0]
         resolved = self.vault.resolve_reference(target)
         if resolved is None:
-            QMessageBox.information(self, "Unresolved link", f"No note matches: {target}")
+            QMessageBox.information(self, "Missing note", f"No note matches: {target}")
             return
         self._open_note_file(self.vault.path / resolved)
 
@@ -323,11 +313,17 @@ class MainWindow(QMainWindow):
         if self.current_note_path is None or self.vault is None:
             return
 
-        current_name = self.current_note_path.name
-        desired_title = self.title_input.text().strip()
+        content = self.editor.toPlainText()
+        lines = content.splitlines()
+        desired_title = ""
+        for line in lines:
+            if line.startswith("# "):
+                desired_title = line[2:].strip()
+                break
         if not desired_title:
             return
 
+        current_name = self.current_note_path.name
         old_note_name = self.current_note_path.stem
         safe_name = f"{desired_title}.md"
         if safe_name == current_name:
@@ -349,8 +345,6 @@ class MainWindow(QMainWindow):
         self.current_note_path.rename(destination)
         self.current_note_path = destination
 
-        content = self.editor.toPlainText()
-        lines = content.splitlines()
         if lines and lines[0].startswith("# "):
             lines[0] = f"# {desired_title}"
             self.editor.setPlainText("\n".join(lines))
