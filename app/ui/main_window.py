@@ -8,6 +8,8 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QListWidget,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -21,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.markdown import render_markdown_to_html
+from app.core.search import fuzzy_note_suggestions, search_notes
 from app.core.vault import Vault
 
 
@@ -60,6 +63,19 @@ class MainWindow(QMainWindow):
         header.addWidget(self.save_note_button)
         root_layout.addLayout(header)
 
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Search notes or titles...")
+        self.search_input.textChanged.connect(self.perform_search)
+
+        self.search_results = QListWidget()
+        self.search_results.itemClicked.connect(self._on_search_result_clicked)
+        self.search_results.setMinimumHeight(160)
+
+        self.suggested_titles: list[str] = []
+
+        root_layout.addWidget(self.search_input)
+        root_layout.addWidget(self.search_results)
+
         splitter = QSplitter(Qt.Horizontal)
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
@@ -89,10 +105,44 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 3)
         root_layout.addWidget(splitter)
 
-        self.status_label = QLabel("Phase 2: markdown notes and vault explorer ready")
+        self.status_label = QLabel("Phase 4: local search and fuzzy lookup ready")
         root_layout.addWidget(self.status_label)
 
         self._setup_shortcuts()
+
+    def perform_search(self) -> None:
+        query = self.search_input.text().strip()
+        self.search_results.clear()
+        if self.vault is None:
+            return
+
+        if not query:
+            self.search_results.clear()
+            return
+
+        self.suggested_titles = fuzzy_note_suggestions(self.vault.path, query)
+        matches = search_notes(self.vault.path, query)
+
+        for result in matches:
+            title = result.get("title", "Untitled")
+            path = result.get("path", "")
+            snippet = result.get("snippet", "")
+            item_text = f"{title}\n{path}\n{snippet}"
+            self.search_results.addItem(item_text)
+
+        if self.search_results.count() == 0:
+            self.search_results.addItem(f"No results for: {query}")
+
+    def _on_search_result_clicked(self, item: QListWidgetItem) -> None:
+        text = item.text()
+        if not text or text.startswith("No results"):
+            return
+        lines = text.splitlines()
+        if len(lines) < 2:
+            return
+        path = lines[1].strip()
+        if self.vault is not None:
+            self._open_note_file(self.vault.path / path)
 
     def _setup_shortcuts(self) -> None:
         open_vault_action = QAction("Open Vault", self)

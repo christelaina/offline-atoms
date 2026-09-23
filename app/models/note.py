@@ -14,6 +14,9 @@ class Note:
     tags: List[str] = field(default_factory=list)
     wikilinks: List[str] = field(default_factory=list)
     frontmatter: dict[str, str] = field(default_factory=dict)
+    outgoing_links: List[str] = field(default_factory=list)
+    backlinks: List[str] = field(default_factory=list)
+    unresolved_links: List[str] = field(default_factory=list)
 
     @property
     def relative_path(self) -> str:
