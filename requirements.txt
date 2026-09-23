@@ -1,0 +1,9 @@
+PySide6>=6.7
+networkx>=3.2
+pyqtgraph>=0.13
+rapidfuzz>=3.0
+watchdog>=4.0
+lark>=1.2
+Pygments>=2.18
+numpy>=1.26
+pytest>=8.0
