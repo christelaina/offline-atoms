@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from urllib.parse import unquote
 
-from PySide6.QtCore import QTimer, QUrl, Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QAction, QBrush, QColor, QFont, QKeySequence, QPainter, QPen
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -20,7 +19,6 @@ from PySide6.QtWidgets import (
     QGraphicsTextItem,
     QGraphicsView,
     QSplitter,
-    QTextBrowser,
     QTextEdit,
     QTreeWidget,
     QTreeWidgetItem,
@@ -28,7 +26,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.core.markdown import render_markdown_to_html
 from app.core.search import fuzzy_note_suggestions, search_notes
 from app.core.vault import Vault
 from watchdog.events import FileSystemEventHandler
@@ -101,49 +98,52 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(
             """
             QMainWindow {
-                background: #121212;
-                color: #e6e6e6;
+                background: #f5f6f8;
+                color: #26313b;
             }
             QWidget {
-                background: #121212;
-                color: #e6e6e6;
+                background: #f5f6f8;
+                color: #26313b;
             }
             QSplitter::handle {
-                background: #1f1f1f;
-                border: 1px solid #2b2b2b;
+                background: #dfe3e8;
+                border: 0;
             }
             QLabel {
-                color: #d8d8d8;
+                color: #52606d;
             }
             QLineEdit,
             QTextEdit,
-            QTextBrowser,
             QListWidget,
             QTreeWidget,
             QPushButton {
-                background: #1d1d1d;
-                color: #f0f0f0;
-                border: 1px solid #2d2d2d;
-                border-radius: 8px;
+                background: #ffffff;
+                color: #26313b;
+                border: 1px solid #dce1e6;
+                border-radius: 4px;
                 padding: 6px 8px;
             }
             QLineEdit:focus,
             QTextEdit:focus,
-            QTextBrowser:focus,
             QListWidget:focus,
             QTreeWidget:focus {
-                border-color: #7b6ee6;
+                border-color: #8da2b8;
             }
             QPushButton {
-                background: #202020;
-                border: 1px solid #3a3a3a;
-                padding: 7px 12px;
+                background: transparent;
+                border: 1px solid transparent;
+                padding: 5px 8px;
             }
             QPushButton:hover {
-                background: #2b2b2b;
+                background: #e8edf2;
             }
             QPushButton:pressed {
-                background: #323232;
+                background: #dce5ed;
+            }
+            QPushButton[active="true"] {
+                background: #d6e5f2;
+                border: 1px solid #a6bfd4;
+                color: #24577d;
             }
             QTreeWidget::item,
             QListWidget::item {
@@ -152,27 +152,27 @@ class MainWindow(QMainWindow):
             }
             QTreeWidget::item:selected,
             QListWidget::item:selected {
-                background: rgba(122, 108, 233, 0.28);
-                color: #ffffff;
+                background: #dbe8f3;
+                color: #1f4e73;
             }
             QTreeWidget::item:hover,
             QListWidget::item:hover {
-                background: rgba(255, 255, 255, 0.04);
+                background: #edf1f5;
             }
             QTreeWidget,
             QListWidget {
-                border: 1px solid #2a2a2a;
-                background: #171717;
+                border: 0;
+                background: #f8f9fa;
             }
             QTextEdit,
-            QTextBrowser {
-                background: #171717;
-                border: 1px solid #2a2a2a;
-                selection-background-color: rgba(123, 110, 230, 0.5);
+            QTextEdit {
+                background: #ffffff;
+                border: 0;
+                selection-background-color: #cfe1f0;
             }
             QHeaderView::section {
-                background: #1b1b1b;
-                color: #d0d0d0;
+                background: #f1f3f5;
+                color: #52606d;
                 border: 0;
                 padding: 6px;
             }
@@ -191,11 +191,14 @@ class MainWindow(QMainWindow):
         button.update()
 
     def _sync_toggle_state(self) -> None:
+        notes_visible = bool(getattr(self, "note_tree_container", None)) and not self.note_tree_container.isHidden()
         if hasattr(self, "toggle_note_tree_button"):
             self._apply_toggle_state(
                 self.toggle_note_tree_button,
-                bool(getattr(self, "note_tree_container", None)) and self.note_tree_container.isVisible(),
+                notes_visible,
             )
+        if hasattr(self, "notes_toggle_button"):
+            self._apply_toggle_state(self.notes_toggle_button, notes_visible)
         if hasattr(self, "toggle_search_button"):
             self._apply_toggle_state(
                 self.toggle_search_button,
@@ -237,35 +240,34 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         root_layout = QHBoxLayout(central)
-        root_layout.setContentsMargins(12, 12, 12, 12)
-        root_layout.setSpacing(12)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
 
         self.taskbar = QWidget()
-        self.taskbar.setFixedWidth(80)
+        self.taskbar.setFixedWidth(44)
         self.taskbar.setStyleSheet(
             """
             QWidget#taskbar {
-                background: #171717;
-                border: 1px solid #2a2a2a;
-                border-radius: 12px;
+                background: #eef0f2;
+                border-right: 1px solid #d9dde2;
             }
             QPushButton {
-                min-height: 42px;
-                min-width: 42px;
-                font-size: 18px;
-                border-radius: 10px;
+                min-height: 32px;
+                min-width: 32px;
+                font-size: 16px;
+                border-radius: 4px;
             }
             QPushButton[active="true"] {
-                background: #2a2a2a;
-                border: 1px solid #7b6ee6;
-                color: #f3f2ff;
+                background: #d6e5f2;
+                border: 1px solid #a6bfd4;
+                color: #24577d;
             }
             """
         )
         self.taskbar.setObjectName("taskbar")
         taskbar_layout = QVBoxLayout(self.taskbar)
-        taskbar_layout.setContentsMargins(8, 10, 8, 10)
-        taskbar_layout.setSpacing(8)
+        taskbar_layout.setContentsMargins(6, 8, 6, 8)
+        taskbar_layout.setSpacing(6)
 
         self.select_vault_button = QPushButton("🗂")
         self.select_vault_button.clicked.connect(self.select_vault)
@@ -292,31 +294,31 @@ class MainWindow(QMainWindow):
             self.save_note_button,
         ):
             button.setToolTip(button.text())
-            button.setFixedWidth(54)
-            button.setFixedHeight(42)
+            button.setFixedWidth(32)
+            button.setFixedHeight(32)
             button.setProperty("active", False)
             button.setStyleSheet(
                 """
                 QPushButton {
-                    background: #202020;
-                    border: 1px solid #363636;
-                    border-radius: 10px;
-                    min-height: 42px;
-                    min-width: 42px;
-                    font-size: 18px;
+                    background: transparent;
+                    border: 1px solid transparent;
+                    border-radius: 4px;
+                    min-height: 32px;
+                    min-width: 32px;
+                    font-size: 16px;
                     font-weight: 600;
                     padding: 0;
                 }
                 QPushButton:hover {
-                    background: #2a2a2a;
+                    background: #e0e6eb;
                 }
                 QPushButton:pressed {
-                    background: #323232;
+                    background: #d3dde5;
                 }
                 QPushButton[active="true"] {
-                    background: #2f2a42;
-                    border: 1px solid #7b6ee6;
-                    color: #f3f2ff;
+                    background: #d6e5f2;
+                    border: 1px solid #a6bfd4;
+                    color: #24577d;
                 }
                 """
             )
@@ -326,9 +328,11 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.taskbar)
 
         main_panel = QWidget()
+        main_panel.setObjectName("mainPanel")
+        main_panel.setStyleSheet("QWidget#mainPanel { background: #ffffff; }")
         main_layout = QVBoxLayout(main_panel)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(12)
+        main_layout.setContentsMargins(16, 12, 16, 12)
+        main_layout.setSpacing(10)
 
         header = QHBoxLayout()
         self.vault_label = QLabel("No vault selected")
@@ -336,6 +340,11 @@ class MainWindow(QMainWindow):
         self.vault_label.setWordWrap(True)
         header.addWidget(self.vault_label)
         header.addStretch()
+        self.notes_toggle_button = QPushButton("Notes")
+        self.notes_toggle_button.setToolTip("Open or close notes tree")
+        self.notes_toggle_button.setFixedHeight(28)
+        self.notes_toggle_button.clicked.connect(self._toggle_note_tree)
+        header.addWidget(self.notes_toggle_button)
         main_layout.addLayout(header)
 
         self.search_panel = QWidget()
@@ -343,9 +352,9 @@ class MainWindow(QMainWindow):
         self.search_panel.setStyleSheet(
             """
             QWidget#drawer {
-                background: #171717;
-                border: 1px solid #2a2a2a;
-                border-radius: 10px;
+                background: #f8f9fa;
+                border: 1px solid #e1e5e9;
+                border-radius: 4px;
             }
             """
         )
@@ -374,38 +383,53 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Horizontal)
         self.note_tree_container = QWidget()
         self.note_tree_container.setObjectName("drawer")
-        self.note_tree_container.setFixedWidth(220)
+        self.note_tree_container.setMinimumHeight(230)
         self.note_tree_container.setStyleSheet(
             """
             QWidget#drawer {
-                background: #171717;
-                border: 1px solid #2a2a2a;
-                border-radius: 10px;
+                background: #f8f9fa;
+                border: 0;
             }
             """
         )
         left_layout = QVBoxLayout(self.note_tree_container)
-        left_layout.setContentsMargins(10, 10, 10, 10)
+        left_layout.setContentsMargins(8, 8, 8, 8)
+        left_layout.setSpacing(6)
+        tree_toolbar = QHBoxLayout()
+        tree_toolbar.setSpacing(2)
+        for button in (
+            ("＋", self.new_note, "New note"),
+            ("↥", self.select_vault, "Open vault"),
+            ("⌕", self._toggle_search, "Search"),
+        ):
+            toolbar_button = QPushButton(button[0])
+            toolbar_button.setToolTip(button[2])
+            toolbar_button.setFixedSize(28, 28)
+            toolbar_button.clicked.connect(button[1])
+            tree_toolbar.addWidget(toolbar_button)
+        tree_toolbar.addStretch()
+        left_layout.addLayout(tree_toolbar)
         self.note_tree = QTreeWidget()
         self.note_tree.setHeaderLabel("Notes")
+        self.note_tree.setIndentation(14)
         self.note_tree.itemClicked.connect(self._on_tree_item_clicked)
         left_layout.addWidget(self.note_tree)
 
         self.sidebar_panel = QWidget()
-        self.sidebar_panel.setFixedWidth(220)
+        self.sidebar_panel.setFixedWidth(200)
         self.sidebar_panel.setObjectName("drawer")
         self.sidebar_panel.setStyleSheet(
             """
             QWidget#drawer {
-                background: #171717;
-                border: 1px solid #2a2a2a;
-                border-radius: 10px;
+                background: #f8f9fa;
+                border-left: 1px solid #e1e5e9;
             }
             """
         )
         self.sidebar_layout = QVBoxLayout(self.sidebar_panel)
         self.sidebar_layout.setContentsMargins(10, 10, 10, 10)
         self.sidebar_layout.setSpacing(8)
+        self.sidebar_layout.addWidget(self.note_tree_container)
 
         self.backlinks_panel = QWidget()
         self.backlinks_panel.setObjectName("drawer")
@@ -436,7 +460,7 @@ class MainWindow(QMainWindow):
         self.graph_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.graph_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.graph_view.setStyleSheet(
-            "QGraphicsView { background: #14141b; border: 1px solid #2a2a3a; border-radius: 8px; }"
+            "QGraphicsView { background: #f4f6f8; border: 1px solid #dfe4e8; border-radius: 4px; }"
         )
         self.graph_list = QListWidget()
         self.graph_list.setVisible(False)
@@ -488,40 +512,14 @@ class MainWindow(QMainWindow):
             }
             """
         )
-        self.editor.textChanged.connect(self._refresh_preview)
-
-        self.preview = QTextBrowser()
-        self.preview.setOpenExternalLinks(False)
-        self.preview.anchorClicked.connect(self._on_preview_link_clicked)
-        self.preview.setHtml("<p>Preview will appear here.</p>")
-        self.preview.setMinimumHeight(220)
-        self.preview.setStyleSheet(
-            """
-            QTextBrowser {
-                font-family: 'Segoe UI', sans-serif;
-                font-size: 13px;
-                line-height: 1.7;
-                padding: 14px 16px;
-            }
-            QTextBrowser h1 { color: #f3f3f3; font-size: 2em; margin-top: 0; margin-bottom: 14px; }
-            QTextBrowser h2 { color: #f3f3f3; font-size: 1.5em; margin-top: 16px; margin-bottom: 10px; }
-            QTextBrowser h3 { color: #f3f3f3; font-size: 1.2em; margin-top: 12px; margin-bottom: 8px; }
-            QTextBrowser p { margin: 8px 0; color: #e5e5e5; }
-            QTextBrowser a { color: #9bb8ff; text-decoration: none; }
-            QTextBrowser strong { color: #ffffff; }
-            QTextBrowser em { color: #d5d5d5; }
-            """
-        )
 
         right_layout.addWidget(self.title_input)
-        right_layout.addWidget(self.editor, 2)
-        right_layout.addWidget(self.preview, 1)
+        right_layout.addWidget(self.editor, 1)
 
-        splitter.addWidget(self.note_tree_container)
         splitter.addWidget(self.sidebar_panel)
         splitter.addWidget(right_panel)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 3)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
         main_layout.addWidget(splitter)
 
         self.status_label = QLabel("Phase 4: local search and fuzzy lookup ready")
@@ -529,10 +527,11 @@ class MainWindow(QMainWindow):
 
         root_layout.addWidget(main_panel)
         self._setup_shortcuts()
+        self._sync_toggle_state()
 
     def _toggle_note_tree(self) -> None:
         if hasattr(self, "note_tree_container"):
-            self.note_tree_container.setVisible(not self.note_tree_container.isVisible())
+            self.note_tree_container.setHidden(not self.note_tree_container.isHidden())
             self._sync_toggle_state()
 
     def _toggle_search(self) -> None:
@@ -657,7 +656,6 @@ class MainWindow(QMainWindow):
             note = self.vault.notes.get(file_path.relative_to(self.vault.path).as_posix())
             if note is not None:
                 self.title_input.setText(note.title)
-        self._refresh_preview()
         self._refresh_related_lists()
         rel_path = file_path.relative_to(self.vault.path).as_posix() if self.vault else file_path.name
         self.status_label.setText(f"Open note: {rel_path}")
@@ -758,10 +756,6 @@ class MainWindow(QMainWindow):
             return
         self._open_note_from_reference(text)
 
-    def _on_preview_link_clicked(self, url: QUrl) -> None:
-        target = unquote(url.toString())
-        self._open_note_from_reference(target)
-
     def _on_tag_clicked(self, item) -> None:
         text = item.text()
         if not text or text == "No tags":
@@ -782,10 +776,6 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Missing note", f"No note matches: {target}")
             return
         self._open_note_file(self.vault.path / resolved)
-
-    def _refresh_preview(self) -> None:
-        content = self.editor.toPlainText()
-        self.preview.setHtml(render_markdown_to_html(content))
 
     def _rewrite_wikilink_references(self, old_name: str, new_name: str, content: str) -> str:
         pattern = re.compile(r"\[\[([^\]|#]+?)(?:#([^\]|]+))?(?:\|([^\]]+))?\]\]")
@@ -901,7 +891,6 @@ class MainWindow(QMainWindow):
             self._open_note_file(self._vault_path / first_note)
         else:
             self.editor.clear()
-            self.preview.setHtml("<p>No notes yet. Create one with Ctrl+N or the New Note button.</p>")
 
         QMessageBox.information(
             self,
