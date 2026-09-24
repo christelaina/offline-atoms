@@ -4,8 +4,8 @@ import re
 from pathlib import Path
 from urllib.parse import unquote
 
-from PySide6.QtCore import QUrl, Qt
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtCore import QTimer, QUrl, Qt
+from PySide6.QtGui import QAction, QBrush, QColor, QFont, QKeySequence, QPainter, QPen
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -15,6 +15,10 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QGraphicsEllipseItem,
+    QGraphicsScene,
+    QGraphicsTextItem,
+    QGraphicsView,
     QSplitter,
     QTextBrowser,
     QTextEdit,
@@ -27,6 +31,61 @@ from PySide6.QtWidgets import (
 from app.core.markdown import render_markdown_to_html
 from app.core.search import fuzzy_note_suggestions, search_notes
 from app.core.vault import Vault
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
+
+
+class GraphNodeItem(QGraphicsEllipseItem):
+    def __init__(self, label: str, reference: str, on_open) -> None:
+        super().__init__(-48, -22, 96, 44)
+        self.reference = reference
+        self.on_open = on_open
+        self.setBrush(QBrush(QColor("#25233b")))
+        self.setPen(QPen(QColor("#8176e8"), 2))
+        self.setAcceptHoverEvents(True)
+        self.setFlag(QGraphicsEllipseItem.GraphicsItemFlag.ItemIsSelectable, True)
+
+        text = QGraphicsTextItem(label, self)
+        text.setDefaultTextColor(QColor("#f1f0ff"))
+        text.setFont(QFont("Segoe UI", 9, QFont.Weight.DemiBold))
+        text.setTextWidth(84)
+        text.setPos(-42, -10)
+
+    def mousePressEvent(self, event) -> None:
+        self.on_open(self.reference)
+        super().mousePressEvent(event)
+
+    def hoverEnterEvent(self, event) -> None:
+        self.setBrush(QBrush(QColor("#3b3560")))
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event) -> None:
+        self.setBrush(QBrush(QColor("#25233b")))
+        super().hoverLeaveEvent(event)
+
+
+class VaultFileWatcher(FileSystemEventHandler):
+    def __init__(self, window: "MainWindow") -> None:
+        self.window = window
+
+    def on_any_event(self, event) -> None:
+        if getattr(event, "is_directory", False):
+            return
+
+        src = getattr(event, "src_path", "")
+        if not src:
+            return
+
+        try:
+            event_path = Path(src).resolve()
+            vault_root = self.window._vault_path.resolve() if self.window._vault_path else None
+        except (OSError, RuntimeError):
+            event_path = None
+            vault_root = None
+
+        if vault_root is not None and event_path is not None:
+            if event_path == vault_root or vault_root in event_path.parents:
+                QTimer.singleShot(150, self.window._handle_watched_event)
 
 
 class MainWindow(QMainWindow):
@@ -34,6 +93,11 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Local Knowledge Vault")
         self.resize(1400, 900)
+        self._vault_path: Path | None = None
+        self.vault: Vault | None = None
+        self.current_note_path: Path | None = None
+        self._observer: Observer | None = None
+        self._watcher: VaultFileWatcher | None = None
         self.setStyleSheet(
             """
             QMainWindow {
@@ -114,11 +178,59 @@ class MainWindow(QMainWindow):
             }
             """
         )
-
-        self._vault_path: Path | None = None
-        self.vault: Vault | None = None
-        self.current_note_path: Path | None = None
         self._init_ui()
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        self._stop_vault_watcher()
+        super().closeEvent(event)
+
+    def _apply_toggle_state(self, button: QPushButton, active: bool) -> None:
+        button.setProperty("active", active)
+        button.style().unpolish(button)
+        button.style().polish(button)
+        button.update()
+
+    def _sync_toggle_state(self) -> None:
+        if hasattr(self, "toggle_note_tree_button"):
+            self._apply_toggle_state(
+                self.toggle_note_tree_button,
+                bool(getattr(self, "note_tree_container", None)) and self.note_tree_container.isVisible(),
+            )
+        if hasattr(self, "toggle_search_button"):
+            self._apply_toggle_state(
+                self.toggle_search_button,
+                bool(getattr(self, "search_panel", None)) and self.search_panel.isVisible(),
+            )
+        if hasattr(self, "toggle_backlinks_button"):
+            self._apply_toggle_state(
+                self.toggle_backlinks_button,
+                bool(getattr(self, "backlinks_panel", None)) and self.backlinks_panel.isVisible(),
+            )
+        if hasattr(self, "toggle_connected_button"):
+            self._apply_toggle_state(
+                self.toggle_connected_button,
+                bool(getattr(self, "connected_panel", None)) and self.connected_panel.isVisible(),
+            )
+
+    def _start_vault_watcher(self) -> None:
+        if self._vault_path is None or not self._vault_path.exists():
+            return
+
+        self._stop_vault_watcher()
+        self._watcher = VaultFileWatcher(self)
+        self._observer = Observer()
+        self._observer.schedule(self._watcher, str(self._vault_path), recursive=True)
+        self._observer.start()
+
+    def _stop_vault_watcher(self) -> None:
+        if self._observer is not None:
+            self._observer.stop()
+            self._observer.join(timeout=2)
+            self._observer = None
+        self._watcher = None
+
+    def _handle_watched_event(self, _event=None) -> None:
+        self._refresh_vault_from_disk()
 
     def _init_ui(self) -> None:
         central = QWidget(self)
@@ -129,30 +241,45 @@ class MainWindow(QMainWindow):
         root_layout.setSpacing(12)
 
         self.taskbar = QWidget()
-        self.taskbar.setFixedWidth(92)
+        self.taskbar.setFixedWidth(80)
         self.taskbar.setStyleSheet(
             """
             QWidget#taskbar {
                 background: #171717;
                 border: 1px solid #2a2a2a;
+                border-radius: 12px;
+            }
+            QPushButton {
+                min-height: 42px;
+                min-width: 42px;
+                font-size: 18px;
                 border-radius: 10px;
+            }
+            QPushButton[active="true"] {
+                background: #2a2a2a;
+                border: 1px solid #7b6ee6;
+                color: #f3f2ff;
             }
             """
         )
         self.taskbar.setObjectName("taskbar")
         taskbar_layout = QVBoxLayout(self.taskbar)
-        taskbar_layout.setContentsMargins(8, 12, 8, 12)
-        taskbar_layout.setSpacing(10)
+        taskbar_layout.setContentsMargins(8, 10, 8, 10)
+        taskbar_layout.setSpacing(8)
 
-        self.select_vault_button = QPushButton("Vault")
+        self.select_vault_button = QPushButton("🗂")
         self.select_vault_button.clicked.connect(self.select_vault)
-        self.new_note_button = QPushButton("New")
+        self.new_note_button = QPushButton("＋")
         self.new_note_button.clicked.connect(self.new_note)
-        self.toggle_note_tree_button = QPushButton("Notes")
+        self.toggle_note_tree_button = QPushButton("🗃")
         self.toggle_note_tree_button.clicked.connect(self._toggle_note_tree)
-        self.toggle_search_button = QPushButton("Search")
+        self.toggle_search_button = QPushButton("⌕")
         self.toggle_search_button.clicked.connect(self._toggle_search)
-        self.save_note_button = QPushButton("Save")
+        self.toggle_backlinks_button = QPushButton("↔")
+        self.toggle_backlinks_button.clicked.connect(self._toggle_backlinks_panel)
+        self.toggle_connected_button = QPushButton("◎")
+        self.toggle_connected_button.clicked.connect(self._toggle_connected_panel)
+        self.save_note_button = QPushButton("💾")
         self.save_note_button.clicked.connect(self.save_current_note)
 
         for button in (
@@ -160,23 +287,36 @@ class MainWindow(QMainWindow):
             self.new_note_button,
             self.toggle_note_tree_button,
             self.toggle_search_button,
+            self.toggle_backlinks_button,
+            self.toggle_connected_button,
             self.save_note_button,
         ):
+            button.setToolTip(button.text())
+            button.setFixedWidth(54)
+            button.setFixedHeight(42)
+            button.setProperty("active", False)
             button.setStyleSheet(
                 """
                 QPushButton {
                     background: #202020;
                     border: 1px solid #363636;
-                    border-radius: 8px;
+                    border-radius: 10px;
                     min-height: 42px;
-                    font-size: 11px;
+                    min-width: 42px;
+                    font-size: 18px;
                     font-weight: 600;
+                    padding: 0;
                 }
                 QPushButton:hover {
                     background: #2a2a2a;
                 }
                 QPushButton:pressed {
                     background: #323232;
+                }
+                QPushButton[active="true"] {
+                    background: #2f2a42;
+                    border: 1px solid #7b6ee6;
+                    color: #f3f2ff;
                 }
                 """
             )
@@ -199,8 +339,18 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(header)
 
         self.search_panel = QWidget()
+        self.search_panel.setObjectName("drawer")
+        self.search_panel.setStyleSheet(
+            """
+            QWidget#drawer {
+                background: #171717;
+                border: 1px solid #2a2a2a;
+                border-radius: 10px;
+            }
+            """
+        )
         self.search_layout = QVBoxLayout(self.search_panel)
-        self.search_layout.setContentsMargins(0, 0, 0, 0)
+        self.search_layout.setContentsMargins(10, 10, 10, 10)
         self.search_layout.setSpacing(8)
 
         self.search_input = QLineEdit()
@@ -219,15 +369,105 @@ class MainWindow(QMainWindow):
         self.search_layout.addWidget(self.search_results)
         self.search_panel.setVisible(False)
         main_layout.addWidget(self.search_panel)
+        self._sync_toggle_state()
 
         splitter = QSplitter(Qt.Horizontal)
         self.note_tree_container = QWidget()
+        self.note_tree_container.setObjectName("drawer")
+        self.note_tree_container.setFixedWidth(220)
+        self.note_tree_container.setStyleSheet(
+            """
+            QWidget#drawer {
+                background: #171717;
+                border: 1px solid #2a2a2a;
+                border-radius: 10px;
+            }
+            """
+        )
         left_layout = QVBoxLayout(self.note_tree_container)
-        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setContentsMargins(10, 10, 10, 10)
         self.note_tree = QTreeWidget()
         self.note_tree.setHeaderLabel("Notes")
         self.note_tree.itemClicked.connect(self._on_tree_item_clicked)
         left_layout.addWidget(self.note_tree)
+
+        self.sidebar_panel = QWidget()
+        self.sidebar_panel.setFixedWidth(220)
+        self.sidebar_panel.setObjectName("drawer")
+        self.sidebar_panel.setStyleSheet(
+            """
+            QWidget#drawer {
+                background: #171717;
+                border: 1px solid #2a2a2a;
+                border-radius: 10px;
+            }
+            """
+        )
+        self.sidebar_layout = QVBoxLayout(self.sidebar_panel)
+        self.sidebar_layout.setContentsMargins(10, 10, 10, 10)
+        self.sidebar_layout.setSpacing(8)
+
+        self.backlinks_panel = QWidget()
+        self.backlinks_panel.setObjectName("drawer")
+        self.backlinks_layout = QVBoxLayout(self.backlinks_panel)
+        self.backlinks_layout.setContentsMargins(0, 0, 0, 0)
+        self.backlinks_list = QListWidget()
+        self.backlinks_list.setMinimumHeight(100)
+        self.backlinks_list.itemDoubleClicked.connect(self._on_list_item_open)
+        self.backlinks_label = QLabel("Backlinks")
+        self.backlinks_label.setStyleSheet("QLabel { color: #a9a9a9; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }")
+        self.backlinks_layout.addWidget(self.backlinks_label)
+        self.backlinks_layout.addWidget(self.backlinks_list)
+        self.backlinks_panel.setVisible(False)
+
+        self.connected_panel = QWidget()
+        self.connected_panel.setObjectName("drawer")
+        self.connected_layout = QVBoxLayout(self.connected_panel)
+        self.connected_layout.setContentsMargins(0, 0, 0, 0)
+        self.connected_layout.setSpacing(8)
+        self.outgoing_list = QListWidget()
+        self.outgoing_list.setMinimumHeight(100)
+        self.outgoing_list.itemDoubleClicked.connect(self._on_list_item_open)
+        self.graph_view = QGraphicsView()
+        self.graph_scene = QGraphicsScene(self)
+        self.graph_view.setScene(self.graph_scene)
+        self.graph_view.setMinimumHeight(210)
+        self.graph_view.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.graph_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.graph_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.graph_view.setStyleSheet(
+            "QGraphicsView { background: #14141b; border: 1px solid #2a2a3a; border-radius: 8px; }"
+        )
+        self.graph_list = QListWidget()
+        self.graph_list.setVisible(False)
+        self.graph_list.itemDoubleClicked.connect(self._on_list_item_open)
+        self.outgoing_label = QLabel("Outgoing")
+        self.outgoing_label.setStyleSheet("QLabel { color: #a9a9a9; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }")
+        self.graph_label = QLabel("Connected Notes")
+        self.graph_label.setStyleSheet("QLabel { color: #a9a9a9; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }")
+        self.connected_layout.addWidget(self.outgoing_label)
+        self.connected_layout.addWidget(self.outgoing_list)
+        self.connected_layout.addWidget(self.graph_label)
+        self.connected_layout.addWidget(self.graph_view)
+        self.connected_layout.addWidget(self.graph_list)
+        self.connected_panel.setVisible(False)
+
+        self.tag_panel = QWidget()
+        self.tag_panel.setObjectName("drawer")
+        self.tag_layout = QVBoxLayout(self.tag_panel)
+        self.tag_layout.setContentsMargins(0, 0, 0, 0)
+        self.tag_list = QListWidget()
+        self.tag_list.setMinimumHeight(80)
+        self.tag_list.itemDoubleClicked.connect(self._on_tag_clicked)
+        self.tags_label = QLabel("Tags")
+        self.tags_label.setStyleSheet("QLabel { color: #a9a9a9; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }")
+        self.tag_layout.addWidget(self.tags_label)
+        self.tag_layout.addWidget(self.tag_list)
+        self.tag_panel.setVisible(False)
+
+        self.sidebar_layout.addWidget(self.backlinks_panel)
+        self.sidebar_layout.addWidget(self.connected_panel)
+        self.sidebar_layout.addWidget(self.tag_panel)
 
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
@@ -273,28 +513,12 @@ class MainWindow(QMainWindow):
             """
         )
 
-        self.backlinks_list = QListWidget()
-        self.backlinks_list.setMinimumHeight(100)
-        self.backlinks_list.itemDoubleClicked.connect(self._on_list_item_open)
-
-        self.outgoing_list = QListWidget()
-        self.outgoing_list.setMinimumHeight(100)
-        self.outgoing_list.itemDoubleClicked.connect(self._on_list_item_open)
-
-        self.backlinks_label = QLabel("Backlinks")
-        self.backlinks_label.setStyleSheet("QLabel { color: #a9a9a9; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }")
-        self.outgoing_label = QLabel("Outgoing")
-        self.outgoing_label.setStyleSheet("QLabel { color: #a9a9a9; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }")
-
         right_layout.addWidget(self.title_input)
         right_layout.addWidget(self.editor, 2)
         right_layout.addWidget(self.preview, 1)
-        right_layout.addWidget(self.backlinks_label)
-        right_layout.addWidget(self.backlinks_list)
-        right_layout.addWidget(self.outgoing_label)
-        right_layout.addWidget(self.outgoing_list)
 
         splitter.addWidget(self.note_tree_container)
+        splitter.addWidget(self.sidebar_panel)
         splitter.addWidget(right_panel)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 3)
@@ -309,10 +533,30 @@ class MainWindow(QMainWindow):
     def _toggle_note_tree(self) -> None:
         if hasattr(self, "note_tree_container"):
             self.note_tree_container.setVisible(not self.note_tree_container.isVisible())
+            self._sync_toggle_state()
 
     def _toggle_search(self) -> None:
         if hasattr(self, "search_panel"):
             self.search_panel.setVisible(not self.search_panel.isVisible())
+            self._sync_toggle_state()
+
+    def _toggle_backlinks_panel(self) -> None:
+        if hasattr(self, "backlinks_panel"):
+            self.backlinks_panel.setVisible(not self.backlinks_panel.isVisible())
+            self._sync_toggle_state()
+
+    def _toggle_connected_panel(self) -> None:
+        if hasattr(self, "connected_panel"):
+            self.connected_panel.setVisible(not self.connected_panel.isVisible())
+            self._sync_toggle_state()
+
+    def _refresh_vault_from_disk(self) -> None:
+        if self.vault is None:
+            return
+        self.vault.refresh()
+        self.populate_note_tree()
+        if self.current_note_path is not None and self.current_note_path.exists():
+            self._open_note_file(self.current_note_path)
 
     def perform_search(self) -> None:
         query = self.search_input.text().strip()
@@ -429,16 +673,84 @@ class MainWindow(QMainWindow):
 
         self.backlinks_list.clear()
         self.outgoing_list.clear()
+        self.graph_list.clear()
+        self.tag_list.clear()
+        self._refresh_graph(note.title, note.backlinks, note.outgoing_links)
 
         for backlink in note.backlinks:
             self.backlinks_list.addItem(backlink)
         for outgoing in note.outgoing_links:
             self.outgoing_list.addItem(outgoing)
 
+        connected: list[str] = []
+        for item in note.backlinks + note.outgoing_links:
+            if item not in connected:
+                connected.append(item)
+        for related in connected:
+            self.graph_list.addItem(related)
+
+        if note.tags:
+            for tag in note.tags:
+                self.tag_list.addItem(f"#{tag}")
+        else:
+            self.tag_list.addItem("No tags")
+
         if self.backlinks_list.count() == 0:
             self.backlinks_list.addItem("No backlinks")
         if self.outgoing_list.count() == 0:
             self.outgoing_list.addItem("No outgoing links")
+        if self.graph_list.count() == 0:
+            self.graph_list.addItem("No connected notes")
+
+    def _refresh_graph(self, title: str, backlinks: list[str], outgoing: list[str]) -> None:
+        self.graph_scene.clear()
+        center = self.graph_scene.addEllipse(
+            -58,
+            -28,
+            116,
+            56,
+            QPen(QColor("#d7a84b"), 2),
+            QBrush(QColor("#4b3920")),
+        )
+        center.setZValue(2)
+        center_label = self.graph_scene.addText(title, QFont("Segoe UI", 10, QFont.Weight.Bold))
+        center_label.setDefaultTextColor(QColor("#fff4d1"))
+        center_label.setTextWidth(104)
+        center_label.setPos(-52, -10)
+        center_label.setZValue(3)
+
+        related: list[tuple[str, str, QColor]] = []
+        for reference in backlinks:
+            related.append((reference, "backlink", QColor("#62b6cb")))
+        for reference in outgoing:
+            if reference not in {item[0] for item in related}:
+                related.append((reference, "outgoing", QColor("#c77dff")))
+
+        if not related:
+            empty_label = self.graph_scene.addText("No connected notes", QFont("Segoe UI", 9))
+            empty_label.setDefaultTextColor(QColor("#89899a"))
+            empty_label.setPos(-58, 58)
+            self.graph_scene.setSceneRect(-120, -90, 240, 180)
+            self.graph_view.fitInView(self.graph_scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+            return
+
+        radius = 82
+        import math
+
+        for index, (reference, _kind, color) in enumerate(related):
+            angle = (2 * math.pi * index / len(related)) - math.pi / 2
+            x = math.cos(angle) * radius
+            y = math.sin(angle) * radius
+            edge = self.graph_scene.addLine(0, 0, x, y, QPen(color, 2))
+            edge.setZValue(0)
+            node = GraphNodeItem(Path(reference).stem, reference, self._open_note_from_reference)
+            node.setPen(QPen(color, 2))
+            node.setPos(x, y)
+            node.setZValue(2)
+            self.graph_scene.addItem(node)
+
+        self.graph_scene.setSceneRect(-150, -145, 300, 290)
+        self.graph_view.fitInView(self.graph_scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
 
     def _on_list_item_open(self, item) -> None:
         text = item.text()
@@ -449,6 +761,13 @@ class MainWindow(QMainWindow):
     def _on_preview_link_clicked(self, url: QUrl) -> None:
         target = unquote(url.toString())
         self._open_note_from_reference(target)
+
+    def _on_tag_clicked(self, item) -> None:
+        text = item.text()
+        if not text or text == "No tags":
+            return
+        self.search_input.setText(text)
+        self.perform_search()
 
     def _open_note_from_reference(self, reference: str) -> None:
         if self.vault is None:
@@ -574,6 +893,7 @@ class MainWindow(QMainWindow):
         self.vault.refresh()
         self.vault_label.setText(f"Vault: {self._vault_path}")
         self.populate_note_tree()
+        self._start_vault_watcher()
         self.status_label.setText(f"Vault selected: {self._vault_path.name}")
 
         if self.vault.notes:

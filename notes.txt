@@ -1,0 +1,8 @@
+### Activate venv
+.\.venv\Scripts\Activate.ps1
+
+### If activation is blocked by PowerShell policy, run
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+
+### Run program
+python -m app.main
