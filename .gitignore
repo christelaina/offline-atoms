@@ -7,5 +7,6 @@ htmlcov/
 .env
 .vscode/
 tmp_vault/
-tests/
+tests/*
+!tests/test_markdown_editor.py
 notes.txt

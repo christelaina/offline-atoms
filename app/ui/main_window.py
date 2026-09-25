@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QSize, QTimer, Qt
-from PySide6.QtGui import QAction, QBrush, QColor, QFont, QKeySequence, QPainter, QPen
+from PySide6.QtGui import QAction, QBrush, QColor, QCursor, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -24,14 +24,93 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QTreeWidget,
     QTreeWidgetItem,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
 
 from app.core.search import fuzzy_note_suggestions, search_notes
 from app.core.vault import Vault
+from app.ui.markdown_editor import MarkdownEditor
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
+
+
+def _sidebar_action_icon(kind: str) -> QIcon:
+    pixmap = QPixmap(24, 24)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor("#c4c0c9"), 1.6)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    if kind == "vault":
+        path = QPainterPath()
+        path.moveTo(3, 8)
+        path.lineTo(9, 8)
+        path.lineTo(11, 10)
+        path.lineTo(21, 10)
+        path.lineTo(18, 18)
+        path.lineTo(3, 18)
+        path.closeSubpath()
+        painter.drawPath(path)
+        painter.drawLine(3, 10, 20, 10)
+        painter.drawLine(8, 13, 14, 13)
+    elif kind == "note":
+        path = QPainterPath()
+        path.moveTo(7, 3)
+        path.lineTo(14, 3)
+        path.lineTo(18, 7)
+        path.lineTo(18, 20)
+        path.lineTo(6, 20)
+        path.lineTo(6, 4)
+        path.closeSubpath()
+        painter.drawPath(path)
+        painter.drawLine(14, 3, 14, 7)
+        painter.drawLine(14, 7, 18, 7)
+        painter.drawLine(9, 12, 15, 12)
+        painter.drawLine(9, 15, 15, 15)
+    elif kind == "folder":
+        path = QPainterPath()
+        path.moveTo(3, 7)
+        path.lineTo(9, 7)
+        path.lineTo(11, 9)
+        path.lineTo(20, 9)
+        path.lineTo(20, 18)
+        path.lineTo(3, 18)
+        path.closeSubpath()
+        painter.drawPath(path)
+        painter.drawLine(12, 11, 12, 16)
+        painter.drawLine(9.5, 13.5, 14.5, 13.5)
+    elif kind == "save":
+        path = QPainterPath()
+        path.moveTo(5, 3)
+        path.lineTo(17, 3)
+        path.lineTo(20, 6)
+        path.lineTo(20, 20)
+        path.lineTo(4, 20)
+        path.lineTo(4, 4)
+        path.closeSubpath()
+        painter.drawPath(path)
+        painter.drawRect(8, 4, 8, 5)
+        painter.drawRect(7, 13, 10, 7)
+    elif kind == "settings":
+        painter.drawLine(12, 2, 12, 5)
+        painter.drawLine(12, 19, 12, 22)
+        painter.drawLine(2, 12, 5, 12)
+        painter.drawLine(19, 12, 22, 12)
+        painter.drawLine(5, 5, 7, 7)
+        painter.drawLine(17, 17, 19, 19)
+        painter.drawLine(19, 5, 17, 7)
+        painter.drawLine(7, 17, 5, 19)
+        painter.drawEllipse(6, 6, 12, 12)
+        painter.drawEllipse(10, 10, 4, 4)
+
+    painter.end()
+    return QIcon(pixmap)
 
 
 class GraphNodeItem(QGraphicsEllipseItem):
@@ -458,14 +537,16 @@ class MainWindow(QMainWindow):
         search_layout.addWidget(self.search_input)
         top_bar_layout.addWidget(self.search_panel, 1)
 
-        self.settings_button = QPushButton("⚙")
+        self.settings_button = QPushButton()
+        self.settings_button.setIcon(_sidebar_action_icon("settings"))
+        self.settings_button.setIconSize(QSize(20, 20))
+        self.settings_button.setAccessibleName("Settings")
         self.settings_button.setToolTip("Settings")
-        self.settings_button.setFixedWidth(32)
-        self.settings_button.setFixedHeight(32)
+        self.settings_button.setFixedSize(32, 32)
         self.settings_button.setEnabled(False)
         self.settings_button.setStyleSheet(
-            "QPushButton { background: #2b2b2b; border: 1px solid #454047; border-radius: 5px; font-size: 15px; padding: 0; }"
-            "QPushButton:hover { background: #343039; }"
+            "QPushButton { background: transparent; border: 1px solid transparent; border-radius: 5px; padding: 0; }"
+            "QPushButton:hover { background: #343039; border-color: #454047; }"
         )
         top_bar_layout.addWidget(self.settings_button)
 
@@ -515,6 +596,26 @@ class MainWindow(QMainWindow):
         self.save_note_button.clicked.connect(self.save_current_note)
         self.save_note_button.setFixedHeight(32)
 
+        sidebar_actions = (
+            (self.select_vault_button, "vault", "Open vault"),
+            (self.new_note_button, "note", "New note"),
+            (self.new_folder_button, "folder", "New folder"),
+            (self.save_note_button, "save", "Save note"),
+        )
+        for button, icon_kind, label in sidebar_actions:
+            button.setText("")
+            button.setIcon(_sidebar_action_icon(icon_kind))
+            button.setIconSize(QSize(20, 20))
+            button.setFixedSize(34, 32)
+            button.setToolTip(label)
+            button.setAccessibleName(label)
+            button.setStyleSheet(
+                "QPushButton { background: transparent; border: 1px solid transparent; "
+                "border-radius: 5px; padding: 0; }"
+                "QPushButton:hover { background: #343039; border-color: #454047; }"
+                "QPushButton:pressed { background: #40394a; }"
+            )
+
         action_row = QHBoxLayout()
         action_row.setSpacing(8)
         action_row.addWidget(self.select_vault_button)
@@ -558,13 +659,19 @@ class MainWindow(QMainWindow):
         self.title_input.setVisible(False)
         self.title_input.setStyleSheet("QLineEdit { padding: 8px 10px; background: #202020; color: #e7e5e4; border: 0; border-bottom: 1px solid #3b383d; border-radius: 0; }")
 
-        self.editor = QTextEdit()
+        self.editor = MarkdownEditor()
+        editor_palette = self.editor.palette()
+        editor_palette.setColor(QPalette.ColorRole.Base, QColor("#202020"))
+        editor_palette.setColor(QPalette.ColorRole.Text, QColor("#d6d3d1"))
+        editor_palette.setColor(QPalette.ColorRole.Mid, QColor("#8f8991"))
+        editor_palette.setColor(QPalette.ColorRole.Link, QColor("#9b8afa"))
+        self.editor.setPalette(editor_palette)
         self.editor.setPlaceholderText("Write a note in Markdown...")
         self.editor.setMinimumHeight(340)
         self.editor.setStyleSheet(
             """
             QTextEdit {
-                font-family: Consolas, 'Segoe UI', sans-serif;
+                font-family: Consolas;
                 font-size: 13px;
                 line-height: 1.6;
                 padding: 14px 16px;
@@ -574,6 +681,8 @@ class MainWindow(QMainWindow):
             }
             """
         )
+        self.editor.linkActivated.connect(self._open_note_from_reference)
+        self.editor.linkHovered.connect(self._show_editor_link_tooltip)
 
         right_layout.addWidget(self.title_input)
         right_layout.addWidget(self.editor, 1)
@@ -1065,6 +1174,15 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Missing note", f"No note matches: {target}")
             return
         self._open_note_file(self.vault.path / resolved)
+
+    def _show_editor_link_tooltip(self, reference: str) -> None:
+        if not reference or self.vault is None:
+            QToolTip.hideText()
+            return
+        target = reference.split("#", 1)[0]
+        resolved = self.vault.resolve_reference(target)
+        message = f"{target} ({resolved})" if resolved else f"Unresolved note: {target}"
+        QToolTip.showText(QCursor.pos(), message, self.editor)
 
     def _rewrite_wikilink_references(self, old_name: str, new_name: str, content: str) -> str:
         pattern = re.compile(r"\[\[([^\]|#]+?)(?:#([^\]|]+))?(?:\|([^\]]+))?\]\]")
