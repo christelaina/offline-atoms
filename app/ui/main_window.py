@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QGraphicsTextItem,
     QGraphicsView,
     QSplitter,
+    QTabWidget,
     QTextEdit,
     QTreeWidget,
     QTreeWidgetItem,
@@ -98,19 +99,19 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(
             """
             QMainWindow {
-                background: #f5f6f8;
-                color: #26313b;
+                background: #f3f5f7;
+                color: #1f2933;
             }
             QWidget {
-                background: #f5f6f8;
-                color: #26313b;
+                background: #f3f5f7;
+                color: #1f2933;
             }
             QSplitter::handle {
-                background: #dfe3e8;
+                background: #dfe5eb;
                 border: 0;
             }
             QLabel {
-                color: #52606d;
+                color: #4a5561;
             }
             QLineEdit,
             QTextEdit,
@@ -118,63 +119,82 @@ class MainWindow(QMainWindow):
             QTreeWidget,
             QPushButton {
                 background: #ffffff;
-                color: #26313b;
-                border: 1px solid #dce1e6;
-                border-radius: 4px;
+                color: #1f2933;
+                border: 1px solid #dfe5eb;
+                border-radius: 6px;
                 padding: 6px 8px;
             }
             QLineEdit:focus,
             QTextEdit:focus,
             QListWidget:focus,
             QTreeWidget:focus {
-                border-color: #8da2b8;
+                border-color: #a7b9c8;
             }
             QPushButton {
-                background: transparent;
-                border: 1px solid transparent;
-                padding: 5px 8px;
+                background: #f8fafc;
+                border: 1px solid #e2e8f0;
+                padding: 5px 10px;
             }
             QPushButton:hover {
-                background: #e8edf2;
+                background: #eef3f8;
             }
             QPushButton:pressed {
-                background: #dce5ed;
+                background: #e2eaf2;
             }
             QPushButton[active="true"] {
-                background: #d6e5f2;
-                border: 1px solid #a6bfd4;
-                color: #24577d;
+                background: #dfeffc;
+                border: 1px solid #b7d3f0;
+                color: #1a5ea8;
             }
             QTreeWidget::item,
             QListWidget::item {
-                border-radius: 6px;
+                border-radius: 5px;
                 padding: 4px 6px;
             }
             QTreeWidget::item:selected,
             QListWidget::item:selected {
-                background: #dbe8f3;
-                color: #1f4e73;
+                background: #dfeffc;
+                color: #204e7a;
             }
             QTreeWidget::item:hover,
             QListWidget::item:hover {
-                background: #edf1f5;
+                background: #edf3f8;
             }
             QTreeWidget,
             QListWidget {
                 border: 0;
-                background: #f8f9fa;
+                background: #f7f9fb;
             }
-            QTextEdit,
             QTextEdit {
                 background: #ffffff;
                 border: 0;
-                selection-background-color: #cfe1f0;
+                selection-background-color: #d5e8ff;
             }
             QHeaderView::section {
-                background: #f1f3f5;
+                background: #eef2f5;
                 color: #52606d;
                 border: 0;
                 padding: 6px;
+            }
+            QTabWidget::pane {
+                border: 1px solid #e2e8f0;
+                background: #f8fafc;
+                border-radius: 8px;
+            }
+            QTabBar::tab {
+                background: #f1f4f7;
+                color: #586874;
+                border: 1px solid #e2e8f0;
+                border-bottom: 0;
+                padding: 6px 12px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                margin-right: 4px;
+            }
+            QTabBar::tab:selected {
+                background: #ffffff;
+                color: #1f2933;
+                border-color: #dfe5eb;
             }
             """
         )
@@ -239,128 +259,69 @@ class MainWindow(QMainWindow):
         central = QWidget(self)
         self.setCentralWidget(central)
 
-        root_layout = QHBoxLayout(central)
+        root_layout = QVBoxLayout(central)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
-        self.taskbar = QWidget()
-        self.taskbar.setFixedWidth(44)
-        self.taskbar.setStyleSheet(
+        self.top_bar = QWidget()
+        self.top_bar.setObjectName("topBar")
+        self.top_bar.setStyleSheet(
             """
-            QWidget#taskbar {
-                background: #eef0f2;
-                border-right: 1px solid #d9dde2;
+            QWidget#topBar {
+                background: #f8fafc;
+                border-bottom: 1px solid #e2e8f0;
             }
             QPushButton {
-                min-height: 32px;
-                min-width: 32px;
-                font-size: 16px;
-                border-radius: 4px;
+                background: #ffffff;
+                border: 1px solid #dde5ee;
+                border-radius: 6px;
+                padding: 6px 10px;
+                color: #26313b;
+                min-height: 30px;
             }
-            QPushButton[active="true"] {
-                background: #d6e5f2;
-                border: 1px solid #a6bfd4;
-                color: #24577d;
+            QPushButton:hover {
+                background: #f0f5fa;
+            }
+            QLineEdit {
+                background: #ffffff;
+                border: 1px solid #dfe5eb;
+                border-radius: 8px;
+                padding: 8px 10px;
+            }
+            QLabel {
+                color: #52606d;
             }
             """
         )
-        self.taskbar.setObjectName("taskbar")
-        taskbar_layout = QVBoxLayout(self.taskbar)
-        taskbar_layout.setContentsMargins(6, 8, 6, 8)
-        taskbar_layout.setSpacing(6)
+        top_bar_layout = QHBoxLayout(self.top_bar)
+        top_bar_layout.setContentsMargins(12, 8, 12, 8)
+        top_bar_layout.setSpacing(12)
 
-        self.select_vault_button = QPushButton("🗂")
+        self.vault_controls = QWidget()
+        vault_controls_layout = QHBoxLayout(self.vault_controls)
+        vault_controls_layout.setContentsMargins(0, 0, 0, 0)
+        vault_controls_layout.setSpacing(8)
+
+        self.select_vault_button = QPushButton("Open vault")
         self.select_vault_button.clicked.connect(self.select_vault)
-        self.new_note_button = QPushButton("＋")
-        self.new_note_button.clicked.connect(self.new_note)
-        self.toggle_note_tree_button = QPushButton("🗃")
-        self.toggle_note_tree_button.clicked.connect(self._toggle_note_tree)
-        self.toggle_search_button = QPushButton("⌕")
-        self.toggle_search_button.clicked.connect(self._toggle_search)
-        self.toggle_backlinks_button = QPushButton("↔")
-        self.toggle_backlinks_button.clicked.connect(self._toggle_backlinks_panel)
-        self.toggle_connected_button = QPushButton("◎")
-        self.toggle_connected_button.clicked.connect(self._toggle_connected_panel)
-        self.save_note_button = QPushButton("💾")
-        self.save_note_button.clicked.connect(self.save_current_note)
+        self.select_vault_button.setFixedHeight(32)
 
-        for button in (
-            self.select_vault_button,
-            self.new_note_button,
-            self.toggle_note_tree_button,
-            self.toggle_search_button,
-            self.toggle_backlinks_button,
-            self.toggle_connected_button,
-            self.save_note_button,
-        ):
-            button.setToolTip(button.text())
-            button.setFixedWidth(32)
-            button.setFixedHeight(32)
-            button.setProperty("active", False)
-            button.setStyleSheet(
-                """
-                QPushButton {
-                    background: transparent;
-                    border: 1px solid transparent;
-                    border-radius: 4px;
-                    min-height: 32px;
-                    min-width: 32px;
-                    font-size: 16px;
-                    font-weight: 600;
-                    padding: 0;
-                }
-                QPushButton:hover {
-                    background: #e0e6eb;
-                }
-                QPushButton:pressed {
-                    background: #d3dde5;
-                }
-                QPushButton[active="true"] {
-                    background: #d6e5f2;
-                    border: 1px solid #a6bfd4;
-                    color: #24577d;
-                }
-                """
-            )
-            taskbar_layout.addWidget(button)
-
-        taskbar_layout.addStretch()
-        root_layout.addWidget(self.taskbar)
-
-        main_panel = QWidget()
-        main_panel.setObjectName("mainPanel")
-        main_panel.setStyleSheet("QWidget#mainPanel { background: #ffffff; }")
-        main_layout = QVBoxLayout(main_panel)
-        main_layout.setContentsMargins(16, 12, 16, 12)
-        main_layout.setSpacing(10)
-
-        header = QHBoxLayout()
         self.vault_label = QLabel("No vault selected")
+        self.vault_label.setStyleSheet("QLabel { font-weight: 600; color: #26313b; }")
         self.vault_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.vault_label.setWordWrap(True)
-        header.addWidget(self.vault_label)
-        header.addStretch()
-        self.notes_toggle_button = QPushButton("Notes")
-        self.notes_toggle_button.setToolTip("Open or close notes tree")
-        self.notes_toggle_button.setFixedHeight(28)
-        self.notes_toggle_button.clicked.connect(self._toggle_note_tree)
-        header.addWidget(self.notes_toggle_button)
-        main_layout.addLayout(header)
+
+        self.breadcrumb_label = QLabel("")
+        self.breadcrumb_label.setStyleSheet("QLabel { color: #7a8794; font-size: 12px; }")
+        self.breadcrumb_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+        vault_controls_layout.addWidget(self.vault_label)
 
         self.search_panel = QWidget()
-        self.search_panel.setObjectName("drawer")
-        self.search_panel.setStyleSheet(
-            """
-            QWidget#drawer {
-                background: #f8f9fa;
-                border: 1px solid #e1e5e9;
-                border-radius: 4px;
-            }
-            """
-        )
-        self.search_layout = QVBoxLayout(self.search_panel)
-        self.search_layout.setContentsMargins(10, 10, 10, 10)
-        self.search_layout.setSpacing(8)
+        self.search_panel.setMinimumWidth(300)
+        self.search_panel.setMaximumWidth(500)
+        search_layout = QVBoxLayout(self.search_panel)
+        search_layout.setContentsMargins(0, 0, 0, 0)
+        search_layout.setSpacing(4)
 
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search notes or titles...")
@@ -369,67 +330,167 @@ class MainWindow(QMainWindow):
 
         self.search_results = QListWidget()
         self.search_results.itemClicked.connect(self._on_search_result_clicked)
-        self.search_results.setMinimumHeight(160)
+        self.search_results.setVisible(False)
+        self.search_results.setMaximumHeight(180)
         self.search_results.setAlternatingRowColors(False)
 
         self.suggested_titles: list[str] = []
 
-        self.search_layout.addWidget(self.search_input)
-        self.search_layout.addWidget(self.search_results)
-        self.search_panel.setVisible(False)
-        main_layout.addWidget(self.search_panel)
-        self._sync_toggle_state()
+        search_layout.addWidget(self.search_input)
+        search_layout.addWidget(self.search_results)
+        top_bar_layout.addWidget(self.search_panel, 1)
 
-        splitter = QSplitter(Qt.Horizontal)
+        self.settings_button = QPushButton("⚙")
+        self.settings_button.setToolTip("Settings")
+        self.settings_button.setFixedWidth(32)
+        self.settings_button.setFixedHeight(32)
+        self.settings_button.setEnabled(False)
+        top_bar_layout.addWidget(self.settings_button)
+
+        root_layout.addWidget(self.top_bar)
+
+        self.main_content = QSplitter(Qt.Horizontal)
+        self.main_content.setChildrenCollapsible(True)
+        self.main_content.setHandleWidth(6)
+        self.main_content.setStyleSheet(
+            """
+            QSplitter::handle {
+                background: #dfe3e8;
+            }
+            """
+        )
+
+        self.nav_panel = QWidget()
+        self.nav_panel.setObjectName("navPanel")
+        self.nav_panel.setMinimumWidth(0)
+        self.nav_panel.setStyleSheet(
+            """
+            QWidget#navPanel {
+                background: #f7f9fb;
+                border-right: 1px solid #e2e8f0;
+            }
+            QPushButton {
+                background: #ffffff;
+                border: 1px solid #dde5ee;
+                border-radius: 6px;
+                min-height: 30px;
+            }
+            """
+        )
+        nav_layout = QVBoxLayout(self.nav_panel)
+        nav_layout.setContentsMargins(10, 10, 10, 10)
+        nav_layout.setSpacing(8)
+
+        self.new_note_button = QPushButton("New note")
+        self.new_note_button.clicked.connect(self.new_note)
+        self.new_note_button.setFixedHeight(32)
+
+        self.save_note_button = QPushButton("Save")
+        self.save_note_button.clicked.connect(self.save_current_note)
+        self.save_note_button.setFixedHeight(32)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+        action_row.addWidget(self.select_vault_button)
+        action_row.addWidget(self.new_note_button)
+        action_row.addWidget(self.save_note_button)
+        nav_layout.addLayout(action_row)
+
         self.note_tree_container = QWidget()
         self.note_tree_container.setObjectName("drawer")
-        self.note_tree_container.setMinimumHeight(230)
         self.note_tree_container.setStyleSheet(
             """
             QWidget#drawer {
-                background: #f8f9fa;
+                background: transparent;
                 border: 0;
             }
             """
         )
-        left_layout = QVBoxLayout(self.note_tree_container)
-        left_layout.setContentsMargins(8, 8, 8, 8)
-        left_layout.setSpacing(6)
-        tree_toolbar = QHBoxLayout()
-        tree_toolbar.setSpacing(2)
-        for button in (
-            ("＋", self.new_note, "New note"),
-            ("↥", self.select_vault, "Open vault"),
-            ("⌕", self._toggle_search, "Search"),
-        ):
-            toolbar_button = QPushButton(button[0])
-            toolbar_button.setToolTip(button[2])
-            toolbar_button.setFixedSize(28, 28)
-            toolbar_button.clicked.connect(button[1])
-            tree_toolbar.addWidget(toolbar_button)
-        tree_toolbar.addStretch()
-        left_layout.addLayout(tree_toolbar)
+        note_tree_layout = QVBoxLayout(self.note_tree_container)
+        note_tree_layout.setContentsMargins(0, 0, 0, 0)
+        note_tree_layout.setSpacing(8)
+
         self.note_tree = QTreeWidget()
         self.note_tree.setHeaderLabel("Notes")
         self.note_tree.setIndentation(14)
         self.note_tree.itemClicked.connect(self._on_tree_item_clicked)
-        left_layout.addWidget(self.note_tree)
+        note_tree_layout.addWidget(self.note_tree)
+        nav_layout.addWidget(self.note_tree_container, 1)
 
-        self.sidebar_panel = QWidget()
-        self.sidebar_panel.setFixedWidth(200)
-        self.sidebar_panel.setObjectName("drawer")
-        self.sidebar_panel.setStyleSheet(
+        self.main_content.addWidget(self.nav_panel)
+
+        self.editor_panel = QWidget()
+        self.editor_panel.setObjectName("editorPanel")
+        self.editor_panel.setStyleSheet("QWidget#editorPanel { background: #ffffff; }")
+        right_layout = QVBoxLayout(self.editor_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(0)
+
+        self.title_input = QLineEdit()
+        self.title_input.setPlaceholderText("Markdown title is derived from # heading")
+        self.title_input.setVisible(False)
+        self.title_input.setStyleSheet("QLineEdit { padding: 8px 10px; border: 0; border-bottom: 1px solid #e5e7eb; border-radius: 0; }")
+
+        self.editor = QTextEdit()
+        self.editor.setPlaceholderText("Write a note in Markdown...")
+        self.editor.setMinimumHeight(340)
+        self.editor.setStyleSheet(
             """
-            QWidget#drawer {
-                background: #f8f9fa;
-                border-left: 1px solid #e1e5e9;
+            QTextEdit {
+                font-family: Consolas, 'Segoe UI', sans-serif;
+                font-size: 13px;
+                line-height: 1.6;
+                padding: 14px 16px;
             }
             """
         )
-        self.sidebar_layout = QVBoxLayout(self.sidebar_panel)
-        self.sidebar_layout.setContentsMargins(10, 10, 10, 10)
-        self.sidebar_layout.setSpacing(8)
-        self.sidebar_layout.addWidget(self.note_tree_container)
+
+        right_layout.addWidget(self.title_input)
+        right_layout.addWidget(self.editor, 1)
+        self.main_content.addWidget(self.editor_panel)
+
+        self.right_panel = QWidget()
+        self.right_panel.setObjectName("rightPanel")
+        self.right_panel.setMinimumWidth(0)
+        self.right_panel.setStyleSheet(
+            """
+            QWidget#rightPanel {
+                background: #f8fafc;
+                border-left: 1px solid #e2e8f0;
+            }
+            """
+        )
+        right_panel_layout = QVBoxLayout(self.right_panel)
+        right_panel_layout.setContentsMargins(10, 10, 10, 10)
+        right_panel_layout.setSpacing(8)
+
+        self.right_tabs = QTabWidget()
+        self.right_tabs.setTabPosition(QTabWidget.TabPosition.North)
+        self.right_tabs.setDocumentMode(True)
+        self.right_tabs.setStyleSheet(
+            """
+            QTabWidget::pane {
+                background: transparent;
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+            }
+            QTabBar::tab {
+                background: #edf2f7;
+                color: #586874;
+                border: 1px solid #e2e8f0;
+                border-bottom: 0;
+                padding: 6px 10px;
+                margin-right: 4px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+            }
+            QTabBar::tab:selected {
+                background: #ffffff;
+                color: #1f2933;
+                border-color: #dfe5eb;
+            }
+            """
+        )
 
         self.backlinks_panel = QWidget()
         self.backlinks_panel.setObjectName("drawer")
@@ -442,7 +503,6 @@ class MainWindow(QMainWindow):
         self.backlinks_label.setStyleSheet("QLabel { color: #a9a9a9; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }")
         self.backlinks_layout.addWidget(self.backlinks_label)
         self.backlinks_layout.addWidget(self.backlinks_list)
-        self.backlinks_panel.setVisible(False)
 
         self.connected_panel = QWidget()
         self.connected_panel.setObjectName("drawer")
@@ -474,7 +534,6 @@ class MainWindow(QMainWindow):
         self.connected_layout.addWidget(self.graph_label)
         self.connected_layout.addWidget(self.graph_view)
         self.connected_layout.addWidget(self.graph_list)
-        self.connected_panel.setVisible(False)
 
         self.tag_panel = QWidget()
         self.tag_panel.setObjectName("drawer")
@@ -487,45 +546,44 @@ class MainWindow(QMainWindow):
         self.tags_label.setStyleSheet("QLabel { color: #a9a9a9; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }")
         self.tag_layout.addWidget(self.tags_label)
         self.tag_layout.addWidget(self.tag_list)
-        self.tag_panel.setVisible(False)
 
-        self.sidebar_layout.addWidget(self.backlinks_panel)
-        self.sidebar_layout.addWidget(self.connected_panel)
-        self.sidebar_layout.addWidget(self.tag_panel)
+        self.right_tabs.addTab(self.backlinks_panel, "Backlinks")
+        self.right_tabs.addTab(self.connected_panel, "Graph")
+        self.right_tabs.addTab(self.tag_panel, "Tags")
+        right_panel_layout.addWidget(self.right_tabs)
+        self.main_content.addWidget(self.right_panel)
 
-        right_panel = QWidget()
-        right_layout = QVBoxLayout(right_panel)
-        self.title_input = QLineEdit()
-        self.title_input.setPlaceholderText("Markdown title is derived from # heading")
-        self.title_input.setVisible(False)
+        self.main_content.setCollapsible(0, True)
+        self.main_content.setCollapsible(1, False)
+        self.main_content.setCollapsible(2, True)
+        self.main_content.setSizes([260, 900, 300])
+        root_layout.addWidget(self.main_content, 1)
 
-        self.editor = QTextEdit()
-        self.editor.setPlaceholderText("Write a note in Markdown...")
-        self.editor.setMinimumHeight(340)
-        self.editor.setStyleSheet(
+        self.status_bar = QWidget()
+        self.status_bar.setObjectName("statusBar")
+        self.status_bar.setStyleSheet(
             """
-            QTextEdit {
-                font-family: Consolas, 'Segoe UI', sans-serif;
-                font-size: 13px;
-                line-height: 1.6;
-                padding: 14px 16px;
+            QWidget#statusBar {
+                background: #f5f7f9;
+                border-top: 1px solid #e2e8f0;
+            }
+            QLabel {
+                color: #677581;
+                font-size: 11px;
             }
             """
         )
-
-        right_layout.addWidget(self.title_input)
-        right_layout.addWidget(self.editor, 1)
-
-        splitter.addWidget(self.sidebar_panel)
-        splitter.addWidget(right_panel)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        main_layout.addWidget(splitter)
-
+        status_layout = QHBoxLayout(self.status_bar)
+        status_layout.setContentsMargins(12, 6, 12, 6)
+        status_layout.setSpacing(8)
         self.status_label = QLabel("Phase 4: local search and fuzzy lookup ready")
-        main_layout.addWidget(self.status_label)
+        self.status_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        status_layout.addWidget(self.status_label)
+        status_layout.addStretch()
+        status_layout.addWidget(self.vault_label)
+        status_layout.addWidget(self.breadcrumb_label)
+        root_layout.addWidget(self.status_bar)
 
-        root_layout.addWidget(main_panel)
         self._setup_shortcuts()
         self._sync_toggle_state()
 
@@ -658,6 +716,7 @@ class MainWindow(QMainWindow):
                 self.title_input.setText(note.title)
         self._refresh_related_lists()
         rel_path = file_path.relative_to(self.vault.path).as_posix() if self.vault else file_path.name
+        self.breadcrumb_label.setText(str(file_path))
         self.status_label.setText(f"Open note: {rel_path}")
 
     def _refresh_related_lists(self) -> None:
@@ -881,7 +940,8 @@ class MainWindow(QMainWindow):
         self._vault_path = Path(vault_dir)
         self.vault = Vault(self._vault_path)
         self.vault.refresh()
-        self.vault_label.setText(f"Vault: {self._vault_path}")
+        self.vault_label.setText("")
+        self.breadcrumb_label.setText(str(self._vault_path))
         self.populate_note_tree()
         self._start_vault_watcher()
         self.status_label.setText(f"Vault selected: {self._vault_path.name}")
