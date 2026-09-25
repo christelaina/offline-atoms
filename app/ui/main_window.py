@@ -3,11 +3,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QPoint, QSize, QTimer, Qt
 from PySide6.QtGui import QAction, QBrush, QColor, QFont, QKeySequence, QPainter, QPen
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -86,6 +87,45 @@ class VaultFileWatcher(FileSystemEventHandler):
                 QTimer.singleShot(150, self.window._handle_watched_event)
 
 
+class VaultTreeWidget(QTreeWidget):
+    IS_DIRECTORY_ROLE = Qt.ItemDataRole.UserRole + 1
+
+    def __init__(self, on_move_requested) -> None:
+        super().__init__()
+        self._on_move_requested = on_move_requested
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QTreeWidget.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    def dropEvent(self, event) -> None:
+        source_item = self.currentItem()
+        target_item = self.itemAt(event.position().toPoint())
+        if source_item is None or target_item is None or source_item is target_item:
+            event.ignore()
+            return
+
+        source_path = source_item.data(0, Qt.ItemDataRole.UserRole) or ""
+        if not source_path:
+            event.ignore()
+            return
+
+        target_path = target_item.data(0, Qt.ItemDataRole.UserRole) or ""
+        target_is_directory = bool(target_item.data(0, self.IS_DIRECTORY_ROLE))
+        if not target_is_directory:
+            target_path = str(Path(target_path).parent).replace("\\", "/")
+            if target_path == ".":
+                target_path = ""
+
+        moved = self._on_move_requested(source_path, target_path)
+        if moved:
+            event.accept()
+        else:
+            event.ignore()
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -94,33 +134,34 @@ class MainWindow(QMainWindow):
         self._vault_path: Path | None = None
         self.vault: Vault | None = None
         self.current_note_path: Path | None = None
+        self._selected_folder_path: Path | None = None
         self._observer: Observer | None = None
         self._watcher: VaultFileWatcher | None = None
         self.setStyleSheet(
             """
             QMainWindow {
-                background: #f3f5f7;
-                color: #1f2933;
+                background: #202020;
+                color: #d6d3d1;
             }
             QWidget {
-                background: #f3f5f7;
-                color: #1f2933;
+                background: #202020;
+                color: #d6d3d1;
             }
             QSplitter::handle {
-                background: #dfe5eb;
+                background: #171717;
                 border: 0;
             }
             QLabel {
-                color: #4a5561;
+                color: #a8a29e;
             }
             QLineEdit,
             QTextEdit,
             QListWidget,
             QTreeWidget,
             QPushButton {
-                background: #ffffff;
-                color: #1f2933;
-                border: 1px solid #dfe5eb;
+                background: #262626;
+                color: #e7e5e4;
+                border: 1px solid #3f3f46;
                 border-radius: 6px;
                 padding: 6px 8px;
             }
@@ -128,23 +169,23 @@ class MainWindow(QMainWindow):
             QTextEdit:focus,
             QListWidget:focus,
             QTreeWidget:focus {
-                border-color: #a7b9c8;
+                border-color: #7c6bd6;
             }
             QPushButton {
-                background: #f8fafc;
-                border: 1px solid #e2e8f0;
+                background: #2b2b2b;
+                border: 1px solid #454047;
                 padding: 5px 10px;
             }
             QPushButton:hover {
-                background: #eef3f8;
+                background: #343039;
             }
             QPushButton:pressed {
-                background: #e2eaf2;
+                background: #40394a;
             }
             QPushButton[active="true"] {
-                background: #dfeffc;
-                border: 1px solid #b7d3f0;
-                color: #1a5ea8;
+                background: #3d3552;
+                border: 1px solid #6555a3;
+                color: #c4b5fd;
             }
             QTreeWidget::item,
             QListWidget::item {
@@ -153,38 +194,71 @@ class MainWindow(QMainWindow):
             }
             QTreeWidget::item:selected,
             QListWidget::item:selected {
-                background: #dfeffc;
-                color: #204e7a;
+                background: #3d3552;
+                color: #e9d5ff;
             }
             QTreeWidget::item:hover,
             QListWidget::item:hover {
-                background: #edf3f8;
+                background: #302d33;
+            }
+            QTreeWidget::item:focus {
+                outline: none;
+                border: 0;
             }
             QTreeWidget,
             QListWidget {
                 border: 0;
-                background: #f7f9fb;
+                background: #242424;
             }
             QTextEdit {
-                background: #ffffff;
+                background: #262626;
                 border: 0;
-                selection-background-color: #d5e8ff;
+                selection-background-color: #5a4b80;
             }
             QHeaderView::section {
-                background: #eef2f5;
-                color: #52606d;
+                background: #2b292c;
+                color: #a8a29e;
                 border: 0;
                 padding: 6px;
             }
+            QScrollBar:vertical {
+                background: #242424;
+                width: 10px;
+                margin: 2px 2px 2px 0;
+                border-radius: 5px;
+            }
+            QScrollBar:horizontal {
+                background: #242424;
+                height: 10px;
+                margin: 0 2px 2px 2px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical,
+            QScrollBar::handle:horizontal {
+                background: #51466f;
+                border-radius: 5px;
+                min-height: 28px;
+                min-width: 28px;
+            }
+            QScrollBar::handle:hover {
+                background: #7564a6;
+            }
+            QScrollBar::add-line,
+            QScrollBar::sub-line,
+            QScrollBar::add-page,
+            QScrollBar::sub-page {
+                background: transparent;
+                border: 0;
+            }
             QTabWidget::pane {
-                border: 1px solid #e2e8f0;
-                background: #f8fafc;
+                border: 1px solid #454047;
+                background: #262626;
                 border-radius: 8px;
             }
             QTabBar::tab {
-                background: #f1f4f7;
-                color: #586874;
-                border: 1px solid #e2e8f0;
+                background: #2b292c;
+                color: #a8a29e;
+                border: 1px solid #454047;
                 border-bottom: 0;
                 padding: 6px 12px;
                 border-top-left-radius: 6px;
@@ -192,9 +266,9 @@ class MainWindow(QMainWindow):
                 margin-right: 4px;
             }
             QTabBar::tab:selected {
-                background: #ffffff;
-                color: #1f2933;
-                border-color: #dfe5eb;
+                background: #262626;
+                color: #e9d5ff;
+                border-color: #6555a3;
             }
             """
         )
@@ -255,6 +329,27 @@ class MainWindow(QMainWindow):
     def _handle_watched_event(self, _event=None) -> None:
         self._refresh_vault_from_disk()
 
+    def _position_search_results(self) -> None:
+        if not hasattr(self, "search_results"):
+            return
+        position = self.search_input.mapToGlobal(QPoint(0, self.search_input.height()))
+        self.search_results.setGeometry(
+            position.x(),
+            position.y(),
+            self.search_input.width(),
+            min(180, max(40, self.search_results.sizeHintForRow(0) * self.search_results.count() + 8)),
+        )
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        if hasattr(self, "search_results") and not self.search_results.isHidden():
+            self._position_search_results()
+
+    def moveEvent(self, event) -> None:  # type: ignore[override]
+        super().moveEvent(event)
+        if hasattr(self, "search_results") and not self.search_results.isHidden():
+            self._position_search_results()
+
     def _init_ui(self) -> None:
         central = QWidget(self)
         self.setCentralWidget(central)
@@ -268,34 +363,35 @@ class MainWindow(QMainWindow):
         self.top_bar.setStyleSheet(
             """
             QWidget#topBar {
-                background: #f8fafc;
-                border-bottom: 1px solid #e2e8f0;
+                background: #242424;
+                border-bottom: 1px solid #353238;
             }
             QPushButton {
-                background: #ffffff;
-                border: 1px solid #dde5ee;
-                border-radius: 6px;
-                padding: 6px 10px;
-                color: #26313b;
-                min-height: 30px;
+                background: #2b2b2b;
+                border: 1px solid #454047;
+                border-radius: 5px;
+                padding: 5px 10px;
+                color: #d6d3d1;
+                min-height: 28px;
             }
             QPushButton:hover {
-                background: #f0f5fa;
+                background: #39343f;
             }
             QLineEdit {
-                background: #ffffff;
-                border: 1px solid #dfe5eb;
-                border-radius: 8px;
-                padding: 8px 10px;
+                background: #1f1f1f;
+                border: 1px solid #3f3b44;
+                border-radius: 6px;
+                padding: 7px 11px;
+                min-height: 30px;
             }
             QLabel {
-                color: #52606d;
+                color: #a8a29e;
             }
             """
         )
         top_bar_layout = QHBoxLayout(self.top_bar)
-        top_bar_layout.setContentsMargins(12, 8, 12, 8)
-        top_bar_layout.setSpacing(12)
+        top_bar_layout.setContentsMargins(14, 7, 14, 7)
+        top_bar_layout.setSpacing(10)
 
         self.vault_controls = QWidget()
         vault_controls_layout = QHBoxLayout(self.vault_controls)
@@ -307,28 +403,51 @@ class MainWindow(QMainWindow):
         self.select_vault_button.setFixedHeight(32)
 
         self.vault_label = QLabel("No vault selected")
-        self.vault_label.setStyleSheet("QLabel { font-weight: 600; color: #26313b; }")
+        self.vault_label.setStyleSheet("QLabel { font-weight: 600; color: #e7e5e4; }")
         self.vault_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         self.breadcrumb_label = QLabel("")
-        self.breadcrumb_label.setStyleSheet("QLabel { color: #7a8794; font-size: 12px; }")
+        self.breadcrumb_label.setStyleSheet("QLabel { color: #8f8991; font-size: 12px; }")
         self.breadcrumb_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         vault_controls_layout.addWidget(self.vault_label)
 
         self.search_panel = QWidget()
-        self.search_panel.setMinimumWidth(300)
-        self.search_panel.setMaximumWidth(500)
+        self.search_panel.setMinimumWidth(320)
+        self.search_panel.setMaximumWidth(520)
         search_layout = QVBoxLayout(self.search_panel)
         search_layout.setContentsMargins(0, 0, 0, 0)
         search_layout.setSpacing(4)
 
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search notes or titles...")
-        self.search_input.setStyleSheet("QLineEdit { padding: 8px 10px; }")
+        self.search_input.setStyleSheet("QLineEdit { padding: 7px 11px; }")
         self.search_input.textChanged.connect(self.perform_search)
 
         self.search_results = QListWidget()
+        self.search_results.setParent(self, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.search_results.setStyleSheet(
+            """
+            QListWidget {
+                background: #262626;
+                color: #d6d3d1;
+                border: 1px solid #6555a3;
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QListWidget::item {
+                border-radius: 4px;
+                padding: 6px 8px;
+            }
+            QListWidget::item:hover {
+                background: #343039;
+            }
+            QListWidget::item:selected {
+                background: #3d3552;
+                color: #e9d5ff;
+            }
+            """
+        )
         self.search_results.itemClicked.connect(self._on_search_result_clicked)
         self.search_results.setVisible(False)
         self.search_results.setMaximumHeight(180)
@@ -337,7 +456,6 @@ class MainWindow(QMainWindow):
         self.suggested_titles: list[str] = []
 
         search_layout.addWidget(self.search_input)
-        search_layout.addWidget(self.search_results)
         top_bar_layout.addWidget(self.search_panel, 1)
 
         self.settings_button = QPushButton("⚙")
@@ -345,6 +463,10 @@ class MainWindow(QMainWindow):
         self.settings_button.setFixedWidth(32)
         self.settings_button.setFixedHeight(32)
         self.settings_button.setEnabled(False)
+        self.settings_button.setStyleSheet(
+            "QPushButton { background: #2b2b2b; border: 1px solid #454047; border-radius: 5px; font-size: 15px; padding: 0; }"
+            "QPushButton:hover { background: #343039; }"
+        )
         top_bar_layout.addWidget(self.settings_button)
 
         root_layout.addWidget(self.top_bar)
@@ -366,12 +488,12 @@ class MainWindow(QMainWindow):
         self.nav_panel.setStyleSheet(
             """
             QWidget#navPanel {
-                background: #f7f9fb;
-                border-right: 1px solid #e2e8f0;
+                background: #242424;
+                border-right: 1px solid #3b383d;
             }
             QPushButton {
-                background: #ffffff;
-                border: 1px solid #dde5ee;
+                background: #2b2b2b;
+                border: 1px solid #454047;
                 border-radius: 6px;
                 min-height: 30px;
             }
@@ -385,6 +507,10 @@ class MainWindow(QMainWindow):
         self.new_note_button.clicked.connect(self.new_note)
         self.new_note_button.setFixedHeight(32)
 
+        self.new_folder_button = QPushButton("New folder")
+        self.new_folder_button.clicked.connect(self.new_folder)
+        self.new_folder_button.setFixedHeight(32)
+
         self.save_note_button = QPushButton("Save")
         self.save_note_button.clicked.connect(self.save_current_note)
         self.save_note_button.setFixedHeight(32)
@@ -393,6 +519,7 @@ class MainWindow(QMainWindow):
         action_row.setSpacing(8)
         action_row.addWidget(self.select_vault_button)
         action_row.addWidget(self.new_note_button)
+        action_row.addWidget(self.new_folder_button)
         action_row.addWidget(self.save_note_button)
         nav_layout.addLayout(action_row)
 
@@ -410,8 +537,8 @@ class MainWindow(QMainWindow):
         note_tree_layout.setContentsMargins(0, 0, 0, 0)
         note_tree_layout.setSpacing(8)
 
-        self.note_tree = QTreeWidget()
-        self.note_tree.setHeaderLabel("Notes")
+        self.note_tree = VaultTreeWidget(self._move_tree_item)
+        self.note_tree.setHeaderHidden(True)
         self.note_tree.setIndentation(14)
         self.note_tree.itemClicked.connect(self._on_tree_item_clicked)
         note_tree_layout.addWidget(self.note_tree)
@@ -421,7 +548,7 @@ class MainWindow(QMainWindow):
 
         self.editor_panel = QWidget()
         self.editor_panel.setObjectName("editorPanel")
-        self.editor_panel.setStyleSheet("QWidget#editorPanel { background: #ffffff; }")
+        self.editor_panel.setStyleSheet("QWidget#editorPanel { background: #202020; }")
         right_layout = QVBoxLayout(self.editor_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(0)
@@ -429,7 +556,7 @@ class MainWindow(QMainWindow):
         self.title_input = QLineEdit()
         self.title_input.setPlaceholderText("Markdown title is derived from # heading")
         self.title_input.setVisible(False)
-        self.title_input.setStyleSheet("QLineEdit { padding: 8px 10px; border: 0; border-bottom: 1px solid #e5e7eb; border-radius: 0; }")
+        self.title_input.setStyleSheet("QLineEdit { padding: 8px 10px; background: #202020; color: #e7e5e4; border: 0; border-bottom: 1px solid #3b383d; border-radius: 0; }")
 
         self.editor = QTextEdit()
         self.editor.setPlaceholderText("Write a note in Markdown...")
@@ -441,6 +568,9 @@ class MainWindow(QMainWindow):
                 font-size: 13px;
                 line-height: 1.6;
                 padding: 14px 16px;
+                background: #202020;
+                color: #d6d3d1;
+                selection-background-color: #5a4b80;
             }
             """
         )
@@ -455,39 +585,40 @@ class MainWindow(QMainWindow):
         self.right_panel.setStyleSheet(
             """
             QWidget#rightPanel {
-                background: #f8fafc;
-                border-left: 1px solid #e2e8f0;
+                background: #242424;
+                border-left: 1px solid #3b383d;
             }
             """
         )
         right_panel_layout = QVBoxLayout(self.right_panel)
-        right_panel_layout.setContentsMargins(10, 10, 10, 10)
-        right_panel_layout.setSpacing(8)
+        right_panel_layout.setContentsMargins(12, 10, 12, 10)
+        right_panel_layout.setSpacing(10)
 
         self.right_tabs = QTabWidget()
         self.right_tabs.setTabPosition(QTabWidget.TabPosition.North)
         self.right_tabs.setDocumentMode(True)
+        self.right_tabs.tabBar().setUsesScrollButtons(False)
         self.right_tabs.setStyleSheet(
             """
             QTabWidget::pane {
                 background: transparent;
-                border: 1px solid #e2e8f0;
-                border-radius: 8px;
+                border: 1px solid #454047;
+                border-radius: 6px;
             }
             QTabBar::tab {
-                background: #edf2f7;
-                color: #586874;
-                border: 1px solid #e2e8f0;
+                background: #2b292c;
+                color: #a8a29e;
+                border: 1px solid #454047;
                 border-bottom: 0;
-                padding: 6px 10px;
-                margin-right: 4px;
+                padding: 7px 12px;
+                margin-right: 3px;
                 border-top-left-radius: 6px;
                 border-top-right-radius: 6px;
             }
             QTabBar::tab:selected {
-                background: #ffffff;
-                color: #1f2933;
-                border-color: #dfe5eb;
+                background: #262626;
+                color: #e9d5ff;
+                border-color: #6555a3;
             }
             """
         )
@@ -495,19 +626,20 @@ class MainWindow(QMainWindow):
         self.backlinks_panel = QWidget()
         self.backlinks_panel.setObjectName("drawer")
         self.backlinks_layout = QVBoxLayout(self.backlinks_panel)
-        self.backlinks_layout.setContentsMargins(0, 0, 0, 0)
+        self.backlinks_layout.setContentsMargins(8, 8, 8, 8)
+        self.backlinks_layout.setSpacing(8)
         self.backlinks_list = QListWidget()
         self.backlinks_list.setMinimumHeight(100)
         self.backlinks_list.itemDoubleClicked.connect(self._on_list_item_open)
         self.backlinks_label = QLabel("Backlinks")
-        self.backlinks_label.setStyleSheet("QLabel { color: #a9a9a9; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }")
+        self.backlinks_label.setStyleSheet("QLabel { color: #8f8991; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }")
         self.backlinks_layout.addWidget(self.backlinks_label)
         self.backlinks_layout.addWidget(self.backlinks_list)
 
         self.connected_panel = QWidget()
         self.connected_panel.setObjectName("drawer")
         self.connected_layout = QVBoxLayout(self.connected_panel)
-        self.connected_layout.setContentsMargins(0, 0, 0, 0)
+        self.connected_layout.setContentsMargins(8, 8, 8, 8)
         self.connected_layout.setSpacing(8)
         self.outgoing_list = QListWidget()
         self.outgoing_list.setMinimumHeight(100)
@@ -520,15 +652,15 @@ class MainWindow(QMainWindow):
         self.graph_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.graph_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.graph_view.setStyleSheet(
-            "QGraphicsView { background: #f4f6f8; border: 1px solid #dfe4e8; border-radius: 4px; }"
+            "QGraphicsView { background: #1f1f1f; border: 1px solid #454047; border-radius: 6px; }"
         )
         self.graph_list = QListWidget()
         self.graph_list.setVisible(False)
         self.graph_list.itemDoubleClicked.connect(self._on_list_item_open)
         self.outgoing_label = QLabel("Outgoing")
-        self.outgoing_label.setStyleSheet("QLabel { color: #a9a9a9; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }")
+        self.outgoing_label.setStyleSheet("QLabel { color: #8f8991; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }")
         self.graph_label = QLabel("Connected Notes")
-        self.graph_label.setStyleSheet("QLabel { color: #a9a9a9; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }")
+        self.graph_label.setStyleSheet("QLabel { color: #8f8991; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }")
         self.connected_layout.addWidget(self.outgoing_label)
         self.connected_layout.addWidget(self.outgoing_list)
         self.connected_layout.addWidget(self.graph_label)
@@ -538,12 +670,13 @@ class MainWindow(QMainWindow):
         self.tag_panel = QWidget()
         self.tag_panel.setObjectName("drawer")
         self.tag_layout = QVBoxLayout(self.tag_panel)
-        self.tag_layout.setContentsMargins(0, 0, 0, 0)
+        self.tag_layout.setContentsMargins(8, 8, 8, 8)
+        self.tag_layout.setSpacing(8)
         self.tag_list = QListWidget()
         self.tag_list.setMinimumHeight(80)
         self.tag_list.itemDoubleClicked.connect(self._on_tag_clicked)
         self.tags_label = QLabel("Tags")
-        self.tags_label.setStyleSheet("QLabel { color: #a9a9a9; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }")
+        self.tags_label.setStyleSheet("QLabel { color: #8f8991; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }")
         self.tag_layout.addWidget(self.tags_label)
         self.tag_layout.addWidget(self.tag_list)
 
@@ -564,11 +697,11 @@ class MainWindow(QMainWindow):
         self.status_bar.setStyleSheet(
             """
             QWidget#statusBar {
-                background: #f5f7f9;
-                border-top: 1px solid #e2e8f0;
+                background: #242424;
+                border-top: 1px solid #3b383d;
             }
             QLabel {
-                color: #677581;
+                color: #8f8991;
                 font-size: 11px;
             }
             """
@@ -619,10 +752,12 @@ class MainWindow(QMainWindow):
         query = self.search_input.text().strip()
         self.search_results.clear()
         if self.vault is None:
+            self.search_results.setVisible(False)
             return
 
         if not query:
             self.search_results.clear()
+            self.search_results.setVisible(False)
             return
 
         self.suggested_titles = fuzzy_note_suggestions(self.vault.path, query)
@@ -637,6 +772,8 @@ class MainWindow(QMainWindow):
 
         if self.search_results.count() == 0:
             self.search_results.addItem(f"No results for: {query}")
+        self._position_search_results()
+        self.search_results.setVisible(True)
 
     def _on_search_result_clicked(self, item: QListWidgetItem) -> None:
         text = item.text()
@@ -648,6 +785,7 @@ class MainWindow(QMainWindow):
         path = lines[1].strip()
         if self.vault is not None:
             self._open_note_file(self.vault.path / path)
+            self.search_results.setVisible(False)
 
     def _setup_shortcuts(self) -> None:
         open_vault_action = QAction("Open Vault", self)
@@ -667,9 +805,73 @@ class MainWindow(QMainWindow):
 
     def _on_tree_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         relative_path = item.data(0, Qt.UserRole)
-        if not relative_path or self.vault is None:
+        if self.vault is None:
             return
+        if item.data(0, VaultTreeWidget.IS_DIRECTORY_ROLE):
+            self._selected_folder_path = self.vault.path / relative_path if relative_path else self.vault.path
+            self.status_label.setText(f"Folder selected: {relative_path or self.vault.path.name}")
+            return
+        if not relative_path:
+            return
+        self._selected_folder_path = (self.vault.path / relative_path).parent
         self._open_note_file(self.vault.path / relative_path)
+
+    def _move_failed(self, message: str) -> bool:
+        QMessageBox.warning(self, "Move failed", message)
+        if self.vault is not None:
+            self.vault.refresh()
+            self.populate_note_tree()
+        return False
+
+    def _move_tree_item(self, source_relative: str, target_relative: str) -> bool:
+        if self.vault is None:
+            return False
+
+        source = self.vault.path / source_relative
+        destination_parent = self.vault.path / target_relative if target_relative else self.vault.path
+        destination = destination_parent / source.name
+
+        try:
+            source_resolved = source.resolve()
+            destination_parent_resolved = destination_parent.resolve()
+            vault_root = self.vault.path.resolve()
+        except OSError:
+            return self._move_failed("The selected path could not be resolved.")
+
+        if not source.exists() or not destination_parent.is_dir():
+            return self._move_failed("The selected file or destination folder is missing.")
+        if source_resolved == destination_parent_resolved:
+            return False
+        if source.is_dir() and destination_parent_resolved.is_relative_to(source_resolved):
+            return self._move_failed("A folder cannot be moved inside itself.")
+        if not destination_parent_resolved.is_relative_to(vault_root):
+            return self._move_failed("Items can only be moved inside the selected vault.")
+        if destination.exists():
+            return self._move_failed(f"An item named '{source.name}' already exists there.")
+
+        source_was_directory = source.is_dir()
+        current_note = self.current_note_path
+        try:
+            source.rename(destination)
+        except OSError as error:
+            return self._move_failed(str(error))
+
+        if current_note is not None:
+            try:
+                current_resolved = current_note.resolve()
+                if current_resolved == source_resolved or (
+                    source_was_directory and current_resolved.is_relative_to(source_resolved)
+                ):
+                    self.current_note_path = destination / current_resolved.relative_to(source_resolved)
+            except OSError:
+                self.current_note_path = None
+
+        self.vault.refresh()
+        self.populate_note_tree()
+        if self.current_note_path is not None and self.current_note_path.exists():
+            self._open_note_file(self.current_note_path)
+        self.status_label.setText(f"Moved: {source.name}")
+        return True
 
     def populate_note_tree(self) -> None:
         self.note_tree.clear()
@@ -678,29 +880,57 @@ class MainWindow(QMainWindow):
 
         root_item = QTreeWidgetItem([self.vault.path.name])
         root_item.setData(0, Qt.UserRole, "")
+        root_item.setData(0, VaultTreeWidget.IS_DIRECTORY_ROLE, True)
+        root_item.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
+        root_item.setFlags(root_item.flags() | Qt.ItemFlag.ItemIsDropEnabled)
         self.note_tree.addTopLevelItem(root_item)
 
-        for raw_path in sorted(self.vault.notes.keys()):
+        paths: set[str] = set(self.vault.notes.keys())
+        for directory in self.vault.path.rglob("*"):
+            if directory.is_dir():
+                paths.add(directory.relative_to(self.vault.path).as_posix())
+
+        for raw_path in sorted(paths, key=lambda path: (path.count("/"), path)):
             parts = raw_path.split("/")
             current_item = root_item
-            for part in parts[:-1]:
+            for part_index, part in enumerate(parts):
                 child_match = None
-                for index in range(current_item.childCount()):
-                    candidate = current_item.child(index)
+                for child_index in range(current_item.childCount()):
+                    candidate = current_item.child(child_index)
                     if candidate.text(0) == part:
                         child_match = candidate
                         break
                 if child_match is None:
                     child_match = QTreeWidgetItem([part])
-                    child_match.setData(0, Qt.UserRole, "")
                     current_item.addChild(child_match)
                 current_item = child_match
+                if part_index == len(parts) - 1:
+                    current_item.setData(0, Qt.UserRole, raw_path)
+                    current_item.setData(0, VaultTreeWidget.IS_DIRECTORY_ROLE, raw_path not in self.vault.notes)
+                else:
+                    current_item.setData(0, Qt.UserRole, "/".join(parts[: part_index + 1]))
+                    current_item.setData(0, VaultTreeWidget.IS_DIRECTORY_ROLE, True)
 
-            file_item = QTreeWidgetItem([parts[-1]])
-            file_item.setData(0, Qt.UserRole, raw_path)
-            current_item.addChild(file_item)
+                flags = current_item.flags() | Qt.ItemFlag.ItemIsDragEnabled
+                if current_item.data(0, VaultTreeWidget.IS_DIRECTORY_ROLE):
+                    flags |= Qt.ItemFlag.ItemIsDropEnabled
+                    current_item.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
+                current_item.setFlags(flags)
 
+        self._add_empty_folder_indicators(root_item)
         self.note_tree.expandAll()
+
+    def _add_empty_folder_indicators(self, item: QTreeWidgetItem) -> None:
+        is_directory = bool(item.data(0, VaultTreeWidget.IS_DIRECTORY_ROLE))
+        if is_directory and item.childCount() == 0:
+            hidden_child = QTreeWidgetItem([""])
+            hidden_child.setFlags(Qt.ItemFlag.NoItemFlags)
+            item.addChild(hidden_child)
+            hidden_child.setSizeHint(0, QSize(0, 0))
+            return
+
+        for child_index in range(item.childCount()):
+            self._add_empty_folder_indicators(item.child(child_index))
 
     def _open_note_file(self, file_path: Path) -> None:
         if not file_path.exists():
@@ -916,17 +1146,52 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No vault", "Select a vault before creating a note.")
             return
 
+        target_folder = self._selected_folder_path or self.vault.path
+        if not target_folder.exists() or not target_folder.is_dir():
+            target_folder = self.vault.path
+
         base_name = "Untitled.md"
-        candidate = self.vault.path / base_name
+        candidate = target_folder / base_name
         index = 1
         while candidate.exists():
-            candidate = self.vault.path / f"Untitled_{index}.md"
+            candidate = target_folder / f"Untitled_{index}.md"
             index += 1
 
         candidate.write_text("# Untitled\n\n", encoding="utf-8")
         self.vault.refresh()
         self.populate_note_tree()
         self._open_note_file(candidate)
+
+    def new_folder(self) -> None:
+        if self.vault is None:
+            QMessageBox.warning(self, "No vault", "Select a vault before creating a folder.")
+            return
+
+        folder_name, accepted = QInputDialog.getText(
+            self,
+            "New folder",
+            "Folder name:",
+            text="New folder",
+        )
+        if not accepted:
+            return
+
+        folder_name = folder_name.strip()
+        if not folder_name or folder_name in {".", ".."} or "/" in folder_name or "\\" in folder_name:
+            QMessageBox.warning(self, "Invalid folder name", "Use a folder name without path separators.")
+            return
+
+        target_folder = self._selected_folder_path or self.vault.path
+        if not target_folder.exists() or not target_folder.is_dir():
+            target_folder = self.vault.path
+        folder_path = target_folder / folder_name
+        if folder_path.exists():
+            QMessageBox.warning(self, "Folder exists", f"A folder named '{folder_name}' already exists.")
+            return
+
+        folder_path.mkdir()
+        self.populate_note_tree()
+        self.status_label.setText(f"Created folder: {folder_name}")
 
     def select_vault(self) -> None:
         vault_dir = QFileDialog.getExistingDirectory(
@@ -939,6 +1204,7 @@ class MainWindow(QMainWindow):
 
         self._vault_path = Path(vault_dir)
         self.vault = Vault(self._vault_path)
+        self._selected_folder_path = self._vault_path
         self.vault.refresh()
         self.vault_label.setText("")
         self.breadcrumb_label.setText(str(self._vault_path))
@@ -952,8 +1218,3 @@ class MainWindow(QMainWindow):
         else:
             self.editor.clear()
 
-        QMessageBox.information(
-            self,
-            "Vault selected",
-            f"Selected vault: {self._vault_path}\n\nNotes folder loaded and ready for editing.",
-        )
