@@ -4,7 +4,7 @@ import re
 import shutil
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QSize, QTimer, Qt
+from PySide6.QtCore import QEvent, QPoint, QSize, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QBrush, QColor, QCursor, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -24,8 +24,10 @@ from PySide6.QtWidgets import (
     QGraphicsTextItem,
     QGraphicsView,
     QSplitter,
+    QTabBar,
     QTabWidget,
     QTextEdit,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QToolTip,
@@ -112,6 +114,9 @@ def _sidebar_action_icon(kind: str) -> QIcon:
         painter.drawLine(7, 17, 5, 19)
         painter.drawEllipse(6, 6, 12, 12)
         painter.drawEllipse(10, 10, 4, 4)
+    elif kind == "close":
+        painter.drawLine(6, 6, 18, 18)
+        painter.drawLine(18, 6, 6, 18)
 
     painter.end()
     return QIcon(pixmap)
@@ -167,7 +172,8 @@ class VaultFileWatcher(FileSystemEventHandler):
 
         if vault_root is not None and event_path is not None:
             if event_path == vault_root or vault_root in event_path.parents:
-                QTimer.singleShot(150, self.window._handle_watched_event)
+                if not self.window._closing:
+                    self.window._vault_refresh_requested.emit()
 
 
 class VaultTreeWidget(QTreeWidget):
@@ -210,6 +216,8 @@ class VaultTreeWidget(QTreeWidget):
 
 
 class MainWindow(QMainWindow):
+    _vault_refresh_requested = Signal()
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Local Knowledge Vault")
@@ -217,9 +225,19 @@ class MainWindow(QMainWindow):
         self._vault_path: Path | None = None
         self.vault: Vault | None = None
         self.current_note_path: Path | None = None
+        self._note_history: list[str] = []
+        self._note_history_index = -1
+        self._history_navigation = False
         self._selected_folder_path: Path | None = None
         self._observer: Observer | None = None
         self._watcher: VaultFileWatcher | None = None
+        self._closing = False
+        self._vault_refresh_requested.connect(
+            self._schedule_vault_refresh, Qt.ConnectionType.QueuedConnection
+        )
+        self._vault_refresh_timer = QTimer(self)
+        self._vault_refresh_timer.setSingleShot(True)
+        self._vault_refresh_timer.timeout.connect(self._handle_watched_event)
         self.setStyleSheet(
             """
             QMainWindow {
@@ -358,7 +376,9 @@ class MainWindow(QMainWindow):
         self._init_ui()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        self._closing = True
         self._stop_vault_watcher()
+        self._vault_refresh_timer.stop()
         super().closeEvent(event)
 
     def _apply_toggle_state(self, button: QPushButton, active: bool) -> None:
@@ -408,9 +428,16 @@ class MainWindow(QMainWindow):
             self._observer.join(timeout=2)
             self._observer = None
         self._watcher = None
+        if hasattr(self, "_vault_refresh_timer"):
+            self._vault_refresh_timer.stop()
+
+    def _schedule_vault_refresh(self) -> None:
+        if not self._closing:
+            self._vault_refresh_timer.start(150)
 
     def _handle_watched_event(self, _event=None) -> None:
-        self._refresh_vault_from_disk()
+        if not self._closing:
+            self._refresh_vault_from_disk()
 
     def _position_search_results(self) -> None:
         if not hasattr(self, "search_results"):
@@ -690,33 +717,17 @@ class MainWindow(QMainWindow):
         self.title_input.setVisible(False)
         self.title_input.setStyleSheet("QLineEdit { padding: 8px 10px; background: #202020; color: #e7e5e4; border: 0; border-bottom: 1px solid #3b383d; border-radius: 0; }")
 
-        self.editor = MarkdownEditor()
-        editor_palette = self.editor.palette()
-        editor_palette.setColor(QPalette.ColorRole.Base, QColor("#202020"))
-        editor_palette.setColor(QPalette.ColorRole.Text, QColor("#d6d3d1"))
-        editor_palette.setColor(QPalette.ColorRole.Mid, QColor("#8f8991"))
-        editor_palette.setColor(QPalette.ColorRole.Link, QColor("#9b8afa"))
-        self.editor.setPalette(editor_palette)
-        self.editor.setPlaceholderText("Write a note in Markdown...")
-        self.editor.setMinimumHeight(340)
-        self.editor.setStyleSheet(
-            """
-            QTextEdit {
-                font-family: Consolas;
-                font-size: 13px;
-                line-height: 1.6;
-                padding: 14px 16px;
-                background: #202020;
-                color: #d6d3d1;
-                selection-background-color: #5a4b80;
-            }
-            """
-        )
-        self.editor.linkActivated.connect(self._open_note_from_reference)
-        self.editor.linkHovered.connect(self._show_editor_link_tooltip)
+        self.editor = self._create_note_editor()
 
         right_layout.addWidget(self.title_input)
-        right_layout.addWidget(self.editor, 1)
+        self.note_tabs = QTabWidget()
+        self.note_tabs.setDocumentMode(True)
+        self.note_tabs.setTabsClosable(True)
+        self.note_tabs.setMovable(True)
+        self.note_tabs.setTabPosition(QTabWidget.TabPosition.North)
+        self.note_tabs.currentChanged.connect(self._on_note_tab_changed)
+        self.note_tabs.tabCloseRequested.connect(self._close_note_tab)
+        right_layout.addWidget(self.note_tabs, 1)
         self.main_content.addWidget(self.editor_panel)
 
         self.right_panel = QWidget()
@@ -1047,6 +1058,17 @@ class MainWindow(QMainWindow):
         quick_switcher_action.triggered.connect(self._open_search)
         self.addAction(quick_switcher_action)
 
+        self.back_action = QAction("Previous Note", self)
+        self.back_action.setShortcut(QKeySequence("Alt+Left"))
+        self.back_action.triggered.connect(self._go_back_history)
+        self.addAction(self.back_action)
+
+        self.forward_action = QAction("Next Note", self)
+        self.forward_action.setShortcut(QKeySequence("Alt+Right"))
+        self.forward_action.triggered.connect(self._go_forward_history)
+        self.addAction(self.forward_action)
+        self._update_history_buttons()
+
     def _on_tree_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         relative_path = item.data(0, Qt.UserRole)
         if self.vault is None:
@@ -1168,9 +1190,10 @@ class MainWindow(QMainWindow):
         try:
             for note_path in self.vault.notes:
                 path = self.vault.path / note_path
+                open_editor = self._editor_for_relative_path(note_path)
                 content = (
-                    self.editor.toPlainText()
-                    if note_path == active_relative
+                    open_editor.toPlainText()
+                    if open_editor is not None
                     else path.read_text(encoding="utf-8", errors="replace")
                 )
                 updated = content
@@ -1186,6 +1209,8 @@ class MainWindow(QMainWindow):
                     updated = self._rewrite_wikilink_references(old_path, new_path, updated)
                 if updated != content or note_path in renamed_notes:
                     pending_contents[note_path] = updated
+                    if open_editor is not None:
+                        open_editor.setPlainText(updated)
 
             source.rename(destination)
             for old_path, content in pending_contents.items():
@@ -1197,6 +1222,7 @@ class MainWindow(QMainWindow):
             self.populate_note_tree()
             return False
 
+        self._update_open_tab_paths(renamed_notes)
         if active_relative is not None:
             active_relative = renamed_notes.get(active_relative, active_relative)
             self.current_note_path = self.vault.path / active_relative
@@ -1248,6 +1274,32 @@ class MainWindow(QMainWindow):
         except (OSError, ValueError) as error:
             QMessageBox.warning(self, "Delete failed", str(error))
             return False
+
+        removed_history_positions: list[int] = []
+        for history_index, history_path in enumerate(self._note_history):
+            try:
+                Path(history_path).resolve().relative_to(resolved)
+                removed_history_positions.append(history_index)
+            except ValueError:
+                continue
+        old_history_index = self._note_history_index
+        self._note_history = [
+            history_path
+            for history_path in self._note_history
+            if not Path(history_path).resolve().is_relative_to(resolved)
+        ]
+        self._note_history_index = max(
+            -1,
+            old_history_index - sum(position <= old_history_index for position in removed_history_positions),
+        )
+        for tab_index in reversed(range(self.note_tabs.count())):
+            page = self.note_tabs.widget(tab_index)
+            try:
+                Path(page.property("notePath")).resolve().relative_to(resolved)
+            except (OSError, ValueError):
+                continue
+            self.note_tabs.removeTab(tab_index)
+            page.deleteLater()
 
         if self.current_note_path is not None:
             try:
@@ -1331,11 +1383,28 @@ class MainWindow(QMainWindow):
             return self._move_failed(f"An item named '{source.name}' already exists there.")
 
         source_was_directory = source.is_dir()
+        source_relative = source.relative_to(self.vault.path).as_posix()
+        destination_relative = destination.relative_to(self.vault.path).as_posix()
+        if source_was_directory:
+            prefix = f"{source_relative}/"
+            moved_notes = {
+                note_path: f"{destination_relative}/{note_path[len(prefix):]}"
+                for note_path in self.vault.notes
+                if note_path.startswith(prefix)
+            }
+        else:
+            moved_notes = (
+                {source_relative: destination_relative}
+                if source_relative in self.vault.notes
+                else {}
+            )
         current_note = self.current_note_path
         try:
             source.rename(destination)
         except OSError as error:
             return self._move_failed(str(error))
+
+        self._update_open_tab_paths(moved_notes)
 
         if current_note is not None:
             try:
@@ -1414,22 +1483,277 @@ class MainWindow(QMainWindow):
         for child_index in range(item.childCount()):
             self._add_empty_folder_indicators(item.child(child_index))
 
+    def _create_note_editor(self) -> MarkdownEditor:
+        editor = MarkdownEditor()
+        editor_palette = editor.palette()
+        editor_palette.setColor(QPalette.ColorRole.Base, QColor("#202020"))
+        editor_palette.setColor(QPalette.ColorRole.Text, QColor("#d6d3d1"))
+        editor_palette.setColor(QPalette.ColorRole.Mid, QColor("#8f8991"))
+        editor_palette.setColor(QPalette.ColorRole.Link, QColor("#9b8afa"))
+        editor.setPalette(editor_palette)
+        editor.setPlaceholderText("Write a note in Markdown...")
+        editor.setMinimumHeight(340)
+        editor.setStyleSheet(
+            """
+            QTextEdit {
+                font-family: Consolas;
+                font-size: 13px;
+                line-height: 1.6;
+                padding: 14px 16px;
+                background: #202020;
+                color: #d6d3d1;
+                selection-background-color: #5a4b80;
+            }
+            """
+        )
+        editor.linkActivated.connect(self._open_note_from_reference)
+        editor.linkHovered.connect(self._show_editor_link_tooltip)
+        editor.document().modificationChanged.connect(
+            lambda modified, current_editor=editor: self._update_note_tab_modified(
+                current_editor, modified
+            )
+        )
+        return editor
+
+    @staticmethod
+    def _tab_editor(page: QWidget) -> MarkdownEditor:
+        layout = page.layout()
+        editor = layout.itemAt(0).widget() if layout is not None else None
+        if not isinstance(editor, MarkdownEditor):
+            raise RuntimeError("Note tab is missing its Markdown editor")
+        return editor
+
+    def _find_note_tab(self, file_path: Path) -> int:
+        expected_path = str(file_path.resolve())
+        for index in range(self.note_tabs.count()):
+            page = self.note_tabs.widget(index)
+            if page.property("notePath") == expected_path:
+                return index
+        return -1
+
+    def _editor_for_relative_path(self, relative_path: str) -> MarkdownEditor | None:
+        if self.vault is None:
+            return None
+        index = self._find_note_tab(self.vault.path / relative_path)
+        if index < 0:
+            return None
+        return self._tab_editor(self.note_tabs.widget(index))
+
+    def _record_note_history(self, file_path: Path) -> None:
+        if self._history_navigation:
+            return
+        path_value = str(file_path.resolve())
+        if self._note_history_index >= 0 and self._note_history[self._note_history_index] == path_value:
+            return
+        self._note_history = self._note_history[: self._note_history_index + 1]
+        self._note_history.append(path_value)
+        self._note_history_index = len(self._note_history) - 1
+        self._update_history_buttons()
+
+    def _update_history_buttons(self) -> None:
+        if not hasattr(self, "back_action"):
+            return
+        self.back_action.setEnabled(self._note_history_index > 0)
+        self.forward_action.setEnabled(
+            self._note_history_index >= 0
+            and self._note_history_index < len(self._note_history) - 1
+        )
+
+    def _set_note_tab_title(self, index: int, title: str) -> None:
+        page = self.note_tabs.widget(index)
+        page.setProperty("tabTitle", title)
+        self.note_tabs.setTabText(
+            index, f"{title}*" if page.property("modified") else title
+        )
+
+    def _update_note_tab_modified(self, editor: MarkdownEditor, modified: bool) -> None:
+        for index in range(self.note_tabs.count()):
+            page = self.note_tabs.widget(index)
+            if self._tab_editor(page) is editor:
+                page.setProperty("modified", modified)
+                title = page.property("tabTitle") or Path(page.property("notePath")).stem
+                self.note_tabs.setTabText(index, f"{title}*" if modified else title)
+                return
+
+    def _navigate_history(self, offset: int) -> None:
+        target_index = self._note_history_index + offset
+        if target_index < 0 or target_index >= len(self._note_history):
+            return
+        target_path = Path(self._note_history[target_index])
+        if not target_path.exists():
+            self._note_history.pop(target_index)
+            self._note_history_index = min(self._note_history_index, len(self._note_history) - 1)
+            self._update_history_buttons()
+            return
+        self._history_navigation = True
+        try:
+            self._open_note_file(target_path)
+            self._note_history_index = target_index
+        finally:
+            self._history_navigation = False
+        self._update_history_buttons()
+
+    def _go_back_history(self) -> None:
+        self._navigate_history(-1)
+
+    def _go_forward_history(self) -> None:
+        self._navigate_history(1)
+
+    def _on_note_tab_changed(self, index: int) -> None:
+        if index < 0:
+            self.current_note_path = None
+            self.title_input.clear()
+            self.breadcrumb_label.clear()
+            self.backlinks_list.clear()
+            self.unresolved_list.clear()
+            self.outgoing_list.clear()
+            self.graph_list.clear()
+            self.tag_list.clear()
+            self.editor = self._create_note_editor()
+            self._update_history_buttons()
+            return
+
+        page = self.note_tabs.widget(index)
+        path_value = page.property("notePath")
+        if not path_value:
+            return
+        self.editor = self._tab_editor(page)
+        self.current_note_path = Path(path_value)
+        relative_path = self.current_note_path.relative_to(self.vault.path).as_posix() if self.vault else self.current_note_path.name
+        note = self.vault.notes.get(relative_path) if self.vault else None
+        self.title_input.setText(note.title if note else self.current_note_path.stem)
+        self._selected_folder_path = self.current_note_path.parent
+        self.breadcrumb_label.setText(str(self.current_note_path))
+        self.status_label.setText(f"Open note: {relative_path}")
+        self._refresh_related_lists()
+        self._record_note_history(self.current_note_path)
+
+    def _update_open_tab_paths(self, path_changes: dict[str, str]) -> None:
+        if self.vault is None or not path_changes:
+            return
+        for index in range(self.note_tabs.count()):
+            page = self.note_tabs.widget(index)
+            old_path = Path(page.property("notePath"))
+            try:
+                old_relative = old_path.relative_to(self.vault.path).as_posix()
+            except ValueError:
+                continue
+            new_relative = path_changes.get(old_relative)
+            if new_relative is None:
+                continue
+            new_path = self.vault.path / new_relative
+            page.setProperty("notePath", str(new_path.resolve()))
+            self._set_note_tab_title(index, new_path.stem)
+            self.note_tabs.setTabToolTip(index, new_relative)
+        updated_history: list[str] = []
+        for history_path in self._note_history:
+            path = Path(history_path)
+            try:
+                relative_path = path.relative_to(self.vault.path).as_posix()
+            except ValueError:
+                updated_history.append(history_path)
+                continue
+            new_relative = path_changes.get(relative_path)
+            updated_history.append(
+                str((self.vault.path / new_relative).resolve())
+                if new_relative is not None
+                else history_path
+            )
+        self._note_history = updated_history
+        current_page = self.note_tabs.currentWidget()
+        if current_page is not None:
+            current_path = current_page.property("notePath")
+            self.current_note_path = Path(current_path) if current_path else None
+        self._update_history_buttons()
+
+    def _reset_open_notes(self) -> None:
+        while self.note_tabs.count():
+            page = self.note_tabs.widget(0)
+            self.note_tabs.removeTab(0)
+            page.deleteLater()
+        self.current_note_path = None
+        self._note_history.clear()
+        self._note_history_index = -1
+        self.editor = self._create_note_editor()
+        self._update_history_buttons()
+
+    def _close_note_tab(self, index: int) -> None:
+        page = self.note_tabs.widget(index)
+        editor = self._tab_editor(page)
+        if editor.document().isModified():
+            answer = QMessageBox.question(
+                self,
+                "Unsaved note",
+                f"Save changes to '{self.note_tabs.tabText(index)}' before closing?",
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save,
+            )
+            if answer == QMessageBox.StandardButton.Cancel:
+                return
+            if answer == QMessageBox.StandardButton.Save:
+                self.note_tabs.setCurrentIndex(index)
+                self.save_current_note()
+                if editor.document().isModified():
+                    return
+        self.note_tabs.removeTab(index)
+        page.deleteLater()
+
+    def _close_note_page(self, page: QWidget) -> None:
+        index = self.note_tabs.indexOf(page)
+        if index >= 0:
+            self._close_note_tab(index)
+
     def _open_note_file(self, file_path: Path) -> None:
         if not file_path.exists():
             QMessageBox.warning(self, "Missing note", f"The note was not found: {file_path}")
             return
 
-        self.current_note_path = file_path
-        content = file_path.read_text(encoding="utf-8", errors="replace")
-        self.editor.setPlainText(content)
-        if self.vault is not None:
-            note = self.vault.notes.get(file_path.relative_to(self.vault.path).as_posix())
-            if note is not None:
-                self.title_input.setText(note.title)
-        self._refresh_related_lists()
-        rel_path = file_path.relative_to(self.vault.path).as_posix() if self.vault else file_path.name
-        self.breadcrumb_label.setText(str(file_path))
-        self.status_label.setText(f"Open note: {rel_path}")
+        file_path = file_path.resolve()
+        existing_index = self._find_note_tab(file_path)
+        if existing_index >= 0:
+            self.note_tabs.setCurrentIndex(existing_index)
+            return
+
+        page = QWidget()
+        page.setProperty("notePath", str(file_path))
+        page.setProperty("tabTitle", file_path.stem)
+        page.setProperty("modified", False)
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(0)
+        if self.note_tabs.count() == 0 and self.editor.parentWidget() is None:
+            editor = self.editor
+        else:
+            editor = self._create_note_editor()
+        editor.setPlainText(file_path.read_text(encoding="utf-8", errors="replace"))
+        editor.document().setModified(False)
+        page_layout.addWidget(editor)
+        relative_path = (
+            file_path.relative_to(self.vault.path).as_posix()
+            if self.vault is not None
+            else file_path.name
+        )
+        index = self.note_tabs.addTab(page, file_path.stem)
+        self.note_tabs.setTabToolTip(index, relative_path)
+        close_button = QToolButton(self.note_tabs.tabBar())
+        close_button.setIcon(_sidebar_action_icon("close"))
+        close_button.setIconSize(QSize(12, 12))
+        close_button.setFixedSize(20, 20)
+        close_button.setAutoRaise(True)
+        close_button.setToolTip("Close note")
+        close_button.setStyleSheet(
+            "QToolButton { background: transparent; border: 0; padding: 2px; }"
+            "QToolButton:hover { background: #3b383d; border-radius: 4px; }"
+        )
+        close_button.clicked.connect(
+            lambda _checked=False, tab_page=page: self._close_note_page(tab_page)
+        )
+        self.note_tabs.tabBar().setTabButton(
+            index, QTabBar.ButtonPosition.RightSide, close_button
+        )
+        self.note_tabs.setCurrentIndex(index)
 
     def _refresh_related_lists(self) -> None:
         if self.vault is None or self.current_note_path is None:
@@ -1637,6 +1961,7 @@ class MainWindow(QMainWindow):
 
         self.current_note_path.rename(destination)
         self.current_note_path = destination
+        self._update_open_tab_paths({old_relative_path: new_relative_path})
 
     def save_current_note(self) -> None:
         if self.current_note_path is None:
@@ -1645,11 +1970,16 @@ class MainWindow(QMainWindow):
 
         self._rename_note_file_if_needed()
         self.current_note_path.write_text(self.editor.toPlainText(), encoding="utf-8")
+        self.editor.document().setModified(False)
+        if self.note_tabs.currentIndex() >= 0:
+            self._set_note_tab_title(
+                self.note_tabs.currentIndex(), self.current_note_path.stem
+            )
         self.status_label.setText(f"Saved: {self.current_note_path.name}")
         if self.vault is not None:
             self.vault.refresh()
             self.populate_note_tree()
-            self._open_note_file(self.current_note_path)
+            self._refresh_related_lists()
 
     def new_note(self) -> None:
         if self.vault is None:
@@ -1712,6 +2042,7 @@ class MainWindow(QMainWindow):
         if not vault_dir:
             return
 
+        self._reset_open_notes()
         self._vault_path = Path(vault_dir)
         self.vault = Vault(self._vault_path)
         self._selected_folder_path = self._vault_path
