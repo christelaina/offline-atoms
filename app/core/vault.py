@@ -49,6 +49,11 @@ class Vault:
             relative_name = f"{raw_target}.md"
 
         candidate = self.path / relative_name
+        try:
+            candidate.resolve().relative_to(self.path.resolve())
+        except (OSError, ValueError):
+            raise ValueError("Target must be inside the vault") from None
+
         if not candidate.exists():
             candidate.parent.mkdir(parents=True, exist_ok=True)
             title = candidate.stem.replace("-", " ").strip() or "Untitled"
@@ -64,6 +69,15 @@ class Vault:
 
         return str(candidate.relative_to(self.path).as_posix())
 
+    def create_note_for_reference(self, link: str) -> str | None:
+        resolved = self.resolve_reference(link)
+        if resolved is not None:
+            return resolved
+        try:
+            return self._ensure_placeholder_note(link)
+        except ValueError:
+            return None
+
     def _rebuild_links(self) -> None:
         for note in self.notes.values():
             note.outgoing_links = []
@@ -74,6 +88,8 @@ class Vault:
             for target in note.wikilinks:
                 resolved = self.resolve_reference(target)
                 if resolved is None:
+                    if target not in note.unresolved_links:
+                        note.unresolved_links.append(target)
                     continue
                 note.outgoing_links.append(resolved)
 
@@ -95,12 +111,14 @@ class Vault:
         if not target:
             return None
 
-        normalized_name = target.strip()
+        normalized_name = target.strip().replace("\\", "/")
         normalized_without_ext = normalized_name[:-3] if normalized_name.lower().endswith(".md") else normalized_name
 
-        exact_candidates = [
-            key for key in self.notes if key.lower() == normalized_name.lower() or key.lower() == f"{normalized_name}.md".lower()
-        ]
+        exact_candidates = [key for key in self.notes if key.lower() == normalized_name.lower()]
+        if not normalized_name.lower().endswith(".md"):
+            exact_candidates.extend(
+                key for key in self.notes if key.lower() == f"{normalized_name}.md".lower()
+            )
         if exact_candidates:
             return exact_candidates[0]
 
@@ -114,14 +132,7 @@ class Vault:
             if key.lower().removesuffix(".md") == normalized_without_ext.lower().replace(" ", "-"):
                 return key
 
-        for key in self.notes:
-            if normalized_without_ext.lower() in key.lower().removesuffix(".md"):
-                return key
-
-        try:
-            return self._ensure_placeholder_note(normalized_name)
-        except ValueError:
-            return None
+        return None
 
     def get_note_by_relative_path(self, relative_path: str) -> Note | None:
         return self.notes.get(relative_path)

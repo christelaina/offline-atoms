@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QSize, QTimer, Qt
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QMainWindow,
     QMessageBox,
+    QMenu,
     QPushButton,
     QGraphicsEllipseItem,
     QGraphicsScene,
@@ -641,6 +643,8 @@ class MainWindow(QMainWindow):
         self.note_tree = VaultTreeWidget(self._move_tree_item)
         self.note_tree.setHeaderHidden(True)
         self.note_tree.setIndentation(14)
+        self.note_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.note_tree.customContextMenuRequested.connect(self._show_tree_context_menu)
         self.note_tree.itemClicked.connect(self._on_tree_item_clicked)
         note_tree_layout.addWidget(self.note_tree)
         nav_layout.addWidget(self.note_tree_container, 1)
@@ -744,6 +748,13 @@ class MainWindow(QMainWindow):
         self.backlinks_label.setStyleSheet("QLabel { color: #8f8991; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }")
         self.backlinks_layout.addWidget(self.backlinks_label)
         self.backlinks_layout.addWidget(self.backlinks_list)
+        self.unresolved_label = QLabel("Unresolved")
+        self.unresolved_label.setStyleSheet("QLabel { color: #d7a84b; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }")
+        self.unresolved_list = QListWidget()
+        self.unresolved_list.setMinimumHeight(80)
+        self.unresolved_list.itemDoubleClicked.connect(self._on_unresolved_link_open)
+        self.backlinks_layout.addWidget(self.unresolved_label)
+        self.backlinks_layout.addWidget(self.unresolved_list)
 
         self.connected_panel = QWidget()
         self.connected_panel.setObjectName("drawer")
@@ -925,6 +936,243 @@ class MainWindow(QMainWindow):
         self._selected_folder_path = (self.vault.path / relative_path).parent
         self._open_note_file(self.vault.path / relative_path)
 
+    def _build_tree_context_menu(self, item: QTreeWidgetItem) -> QMenu | None:
+        relative_path = item.data(0, Qt.ItemDataRole.UserRole)
+        if not relative_path:
+            return None
+
+        is_directory = bool(item.data(0, VaultTreeWidget.IS_DIRECTORY_ROLE))
+        menu = QMenu(self)
+        rename_action = menu.addAction("Rename")
+        delete_action = menu.addAction("Delete")
+        rename_action.triggered.connect(
+            lambda _checked=False, path=relative_path: self._prompt_rename_vault_item(path)
+        )
+        delete_action.triggered.connect(
+            lambda _checked=False, path=relative_path: self._confirm_delete_vault_item(path)
+        )
+        if not is_directory:
+            duplicate_action = menu.addAction("Duplicate")
+            duplicate_action.triggered.connect(
+                lambda _checked=False, path=relative_path: self._duplicate_vault_note(path)
+            )
+        return menu
+
+    def _show_tree_context_menu(self, position: QPoint) -> None:
+        item = self.note_tree.itemAt(position)
+        if item is None:
+            return
+        self.note_tree.setCurrentItem(item)
+        menu = self._build_tree_context_menu(item)
+        if menu is not None:
+            menu.exec(self.note_tree.viewport().mapToGlobal(position))
+
+    def _vault_item_path(self, relative_path: str) -> Path | None:
+        if self.vault is None or not relative_path:
+            return None
+        item_path = self.vault.path / relative_path
+        try:
+            item_path.resolve().relative_to(self.vault.path.resolve())
+        except (OSError, ValueError):
+            return None
+        return item_path if item_path.exists() else None
+
+    def _prompt_rename_vault_item(self, relative_path: str) -> None:
+        item_path = self._vault_item_path(relative_path)
+        if item_path is None:
+            return
+        is_note = item_path.is_file()
+        current_name = item_path.stem if is_note else item_path.name
+        new_name, accepted = QInputDialog.getText(
+            self, "Rename", "New name:", text=current_name
+        )
+        if accepted:
+            self._rename_vault_item(relative_path, new_name)
+
+    def _rename_vault_item(self, relative_path: str, new_name: str) -> bool:
+        if self.vault is None:
+            return False
+        source = self._vault_item_path(relative_path)
+        new_name = new_name.strip()
+        if source is None:
+            return False
+        if (
+            not new_name
+            or new_name in {".", ".."}
+            or any(character in new_name for character in '<>:"/\\|?*')
+            or new_name.endswith((".", " "))
+        ):
+            QMessageBox.warning(self, "Invalid name", "Enter a valid file or folder name.")
+            return False
+
+        is_note = source.is_file()
+        if is_note:
+            if new_name.lower().endswith(".md"):
+                new_name = new_name[:-3]
+            if not new_name:
+                QMessageBox.warning(self, "Invalid name", "A note name cannot be empty.")
+                return False
+            destination = source.with_name(f"{new_name}.md")
+        else:
+            destination = source.with_name(new_name)
+        if destination == source:
+            return True
+        if destination.exists():
+            QMessageBox.warning(self, "Name conflict", f"'{destination.name}' already exists.")
+            return False
+
+        old_relative = source.relative_to(self.vault.path).as_posix()
+        new_relative = destination.relative_to(self.vault.path).as_posix()
+        if is_note:
+            renamed_notes = {old_relative: new_relative} if old_relative in self.vault.notes else {}
+        else:
+            prefix = f"{old_relative}/"
+            renamed_notes = {
+                note_path: f"{new_relative}/{note_path[len(prefix):]}"
+                for note_path in self.vault.notes
+                if note_path.startswith(prefix)
+            }
+
+        pending_contents: dict[str, str] = {}
+        active_relative = None
+        if self.current_note_path is not None:
+            try:
+                active_relative = self.current_note_path.relative_to(self.vault.path).as_posix()
+            except ValueError:
+                active_relative = None
+
+        try:
+            for note_path in self.vault.notes:
+                path = self.vault.path / note_path
+                content = (
+                    self.editor.toPlainText()
+                    if note_path == active_relative
+                    else path.read_text(encoding="utf-8", errors="replace")
+                )
+                updated = content
+                if is_note and note_path == old_relative:
+                    lines = updated.splitlines(keepends=True)
+                    for index, line in enumerate(lines):
+                        heading = re.match(r"^(#\s+)(.*?)(\r?\n)?$", line)
+                        if heading:
+                            lines[index] = f"# {new_name}{heading.group(3) or ''}"
+                            updated = "".join(lines)
+                            break
+                for old_path, new_path in renamed_notes.items():
+                    updated = self._rewrite_wikilink_references(old_path, new_path, updated)
+                if updated != content or note_path in renamed_notes:
+                    pending_contents[note_path] = updated
+
+            source.rename(destination)
+            for old_path, content in pending_contents.items():
+                target_path = self.vault.path / renamed_notes.get(old_path, old_path)
+                target_path.write_text(content, encoding="utf-8")
+        except OSError as error:
+            QMessageBox.warning(self, "Rename failed", str(error))
+            self.vault.refresh()
+            self.populate_note_tree()
+            return False
+
+        if active_relative is not None:
+            active_relative = renamed_notes.get(active_relative, active_relative)
+            self.current_note_path = self.vault.path / active_relative
+        if self._selected_folder_path is not None:
+            try:
+                selected_relative = self._selected_folder_path.relative_to(self.vault.path).as_posix()
+                if selected_relative == old_relative or selected_relative.startswith(f"{old_relative}/"):
+                    suffix = selected_relative[len(old_relative):].lstrip("/")
+                    self._selected_folder_path = destination / suffix if suffix else destination
+            except ValueError:
+                pass
+
+        self.vault.refresh()
+        self.populate_note_tree()
+        if self.current_note_path is not None and self.current_note_path.exists():
+            self._open_note_file(self.current_note_path)
+        self.status_label.setText(f"Renamed: {source.name} to {destination.name}")
+        return True
+
+    def _confirm_delete_vault_item(self, relative_path: str) -> bool:
+        item_path = self._vault_item_path(relative_path)
+        if item_path is None:
+            return False
+        answer = QMessageBox.question(
+            self,
+            "Delete",
+            f"Delete '{item_path.name}'? This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+        return self._delete_vault_item(relative_path)
+
+    def _delete_vault_item(self, relative_path: str) -> bool:
+        if self.vault is None:
+            return False
+        item_path = self._vault_item_path(relative_path)
+        if item_path is None:
+            return False
+        try:
+            resolved = item_path.resolve()
+            vault_root = self.vault.path.resolve()
+            resolved.relative_to(vault_root)
+            if item_path.is_symlink() or not item_path.is_dir():
+                item_path.unlink()
+            else:
+                shutil.rmtree(item_path)
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "Delete failed", str(error))
+            return False
+
+        if self.current_note_path is not None:
+            try:
+                self.current_note_path.resolve().relative_to(resolved)
+                self.current_note_path = None
+                self.editor.clear()
+                self.backlinks_list.clear()
+                self.unresolved_list.clear()
+                self.outgoing_list.clear()
+                self.graph_list.clear()
+                self.tag_list.clear()
+            except ValueError:
+                pass
+        if self._selected_folder_path is not None:
+            try:
+                self._selected_folder_path.resolve().relative_to(resolved)
+                self._selected_folder_path = self.vault.path
+            except ValueError:
+                pass
+
+        self.vault.refresh()
+        self.populate_note_tree()
+        self.status_label.setText(f"Deleted: {item_path.name}")
+        return True
+
+    def _duplicate_vault_note(self, relative_path: str) -> Path | None:
+        if self.vault is None:
+            return None
+        source = self._vault_item_path(relative_path)
+        if source is None or not source.is_file() or source.suffix.lower() != ".md":
+            return None
+
+        copy_name = f"{source.stem} copy"
+        destination = source.with_name(f"{copy_name}.md")
+        index = 2
+        while destination.exists():
+            destination = source.with_name(f"{copy_name} {index}.md")
+            index += 1
+        try:
+            shutil.copy2(source, destination)
+        except OSError as error:
+            QMessageBox.warning(self, "Duplicate failed", str(error))
+            return None
+
+        self.vault.refresh()
+        self.populate_note_tree()
+        self.status_label.setText(f"Duplicated: {source.name}")
+        return destination
+
     def _move_failed(self, message: str) -> bool:
         QMessageBox.warning(self, "Move failed", message)
         if self.vault is not None:
@@ -1068,6 +1316,7 @@ class MainWindow(QMainWindow):
             return
 
         self.backlinks_list.clear()
+        self.unresolved_list.clear()
         self.outgoing_list.clear()
         self.graph_list.clear()
         self.tag_list.clear()
@@ -1075,6 +1324,8 @@ class MainWindow(QMainWindow):
 
         for backlink in note.backlinks:
             self.backlinks_list.addItem(backlink)
+        for unresolved in note.unresolved_links:
+            self.unresolved_list.addItem(unresolved)
         for outgoing in note.outgoing_links:
             self.outgoing_list.addItem(outgoing)
 
@@ -1093,6 +1344,8 @@ class MainWindow(QMainWindow):
 
         if self.backlinks_list.count() == 0:
             self.backlinks_list.addItem("No backlinks")
+        if self.unresolved_list.count() == 0:
+            self.unresolved_list.addItem("No unresolved links")
         if self.outgoing_list.count() == 0:
             self.outgoing_list.addItem("No outgoing links")
         if self.graph_list.count() == 0:
@@ -1154,6 +1407,12 @@ class MainWindow(QMainWindow):
             return
         self._open_note_from_reference(text)
 
+    def _on_unresolved_link_open(self, item) -> None:
+        target = item.text()
+        if not target or target == "No unresolved links":
+            return
+        self._open_note_from_reference(target)
+
     def _on_tag_clicked(self, item) -> None:
         text = item.text()
         if not text or text == "No tags":
@@ -1171,8 +1430,12 @@ class MainWindow(QMainWindow):
             target = target.split("#", 1)[0]
         resolved = self.vault.resolve_reference(target)
         if resolved is None:
-            QMessageBox.information(self, "Missing note", f"No note matches: {target}")
-            return
+            resolved = self.vault.create_note_for_reference(target)
+            if resolved is None:
+                QMessageBox.warning(self, "Invalid note link", f"Cannot create a note for: {target}")
+                return
+            self.vault.refresh()
+            self.populate_note_tree()
         self._open_note_file(self.vault.path / resolved)
 
     def _show_editor_link_tooltip(self, reference: str) -> None:
@@ -1184,18 +1447,17 @@ class MainWindow(QMainWindow):
         message = f"{target} ({resolved})" if resolved else f"Unresolved note: {target}"
         QToolTip.showText(QCursor.pos(), message, self.editor)
 
-    def _rewrite_wikilink_references(self, old_name: str, new_name: str, content: str) -> str:
+    def _rewrite_wikilink_references(self, old_path: str, new_path: str, content: str) -> str:
         pattern = re.compile(r"\[\[([^\]|#]+?)(?:#([^\]|]+))?(?:\|([^\]]+))?\]\]")
 
         def replace(match: re.Match[str]) -> str:
             target = match.group(1).strip()
             heading = match.group(2)
             alias = match.group(3)
-            candidate_names = {old_name, f"{old_name}.md", old_name.replace(" ", "-")}
-            if target in candidate_names:
-                target = new_name
-            elif target.endswith(".md") and target[:-3] in candidate_names:
-                target = f"{new_name}.md"
+            if self.vault is None or self.vault.resolve_reference(target) != old_path:
+                return match.group(0)
+
+            target = new_path if target.lower().endswith(".md") else Path(new_path).with_suffix("").as_posix()
             replacement = f"[[{target}"
             if heading:
                 replacement += f"#{heading}"
@@ -1221,7 +1483,6 @@ class MainWindow(QMainWindow):
             return
 
         current_name = self.current_note_path.name
-        old_note_name = self.current_note_path.stem
         safe_name = f"{desired_title}.md"
         if safe_name == current_name:
             return
@@ -1231,20 +1492,26 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Name conflict", f"A note named '{safe_name}' already exists in this folder.")
             return
 
-        for relative_path, note in list(self.vault.notes.items()):
-            if relative_path == self.current_note_path.relative_to(self.vault.path).as_posix():
-                continue
-            updated_content = self._rewrite_wikilink_references(old_note_name, desired_title, note.content)
-            if updated_content != note.content:
-                path = self.vault.path / relative_path
-                path.write_text(updated_content, encoding="utf-8")
+        old_relative_path = self.current_note_path.relative_to(self.vault.path).as_posix()
+        new_relative_path = destination.relative_to(self.vault.path).as_posix()
+        for relative_path in list(self.vault.notes):
+            path = self.vault.path / relative_path
+            source_content = (
+                self.editor.toPlainText()
+                if relative_path == old_relative_path
+                else path.read_text(encoding="utf-8", errors="replace")
+            )
+            updated_content = self._rewrite_wikilink_references(
+                old_relative_path, new_relative_path, source_content
+            )
+            if updated_content != source_content:
+                if relative_path == old_relative_path:
+                    self.editor.setPlainText(updated_content)
+                else:
+                    path.write_text(updated_content, encoding="utf-8")
 
         self.current_note_path.rename(destination)
         self.current_note_path = destination
-
-        if lines and lines[0].startswith("# "):
-            lines[0] = f"# {desired_title}"
-            self.editor.setPlainText("\n".join(lines))
 
     def save_current_note(self) -> None:
         if self.current_note_path is None:
