@@ -5,8 +5,9 @@ import shutil
 from datetime import date, datetime
 from pathlib import Path
 
+import networkx as nx
 from PySide6.QtCore import QEvent, QPoint, QSize, QTimer, Qt, Signal
-from PySide6.QtGui import QAction, QBrush, QColor, QCursor, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap
+from PySide6.QtGui import QAction, QBrush, QColor, QCursor, QFont, QFontMetrics, QIcon, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog,
     QComboBox,
@@ -21,6 +22,8 @@ from PySide6.QtWidgets import (
     QMenu,
     QPushButton,
     QGraphicsEllipseItem,
+    QGraphicsLineItem,
+    QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsTextItem,
     QGraphicsView,
@@ -153,32 +156,275 @@ def _sidebar_action_icon(kind: str) -> QIcon:
 
 
 class GraphNodeItem(QGraphicsEllipseItem):
-    def __init__(self, label: str, reference: str, on_open) -> None:
-        super().__init__(-48, -22, 96, 44)
+    """Draggable, hoverable graph node; open-on-click, drag-to-reposition."""
+
+    CLICK_DRAG_THRESHOLD = 4.0
+
+    def __init__(
+        self,
+        label: str,
+        reference: str,
+        on_open,
+        on_hover=None,
+        on_drag_end=None,
+        radius: float = 16.0,
+        base_color: QColor = QColor("#25233b"),
+        hover_color: QColor = QColor("#3b3560"),
+        border_color: QColor = QColor("#8176e8"),
+        text_color: QColor = QColor("#d7d4dc"),
+    ) -> None:
+        super().__init__(-radius, -radius, radius * 2, radius * 2)
         self.reference = reference
         self.on_open = on_open
-        self.setBrush(QBrush(QColor("#25233b")))
-        self.setPen(QPen(QColor("#8176e8"), 2))
+        self.on_hover = on_hover
+        self.on_drag_end = on_drag_end
+        self.edges: list["GraphEdgeItem"] = []
+        self.vx = 0.0
+        self.vy = 0.0
+        self.pinned = False
+        self._base_color = base_color
+        self._hover_color = hover_color
+        self._press_pos = None
+        self.setBrush(QBrush(base_color))
+        self.setPen(QPen(border_color, 2))
         self.setAcceptHoverEvents(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFlag(QGraphicsEllipseItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self.setFlag(QGraphicsEllipseItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.setFlag(QGraphicsEllipseItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
+
+        label_font = QFont("Segoe UI", 8, QFont.Weight.DemiBold)
+        metrics = QFontMetrics(label_font)
+        text_width = metrics.horizontalAdvance(label) + 10
+        text_height = metrics.height() + 4
+
+        label_background = QGraphicsRectItem(-text_width / 2, radius + 3, text_width, text_height, self)
+        label_background.setBrush(QBrush(QColor(0, 0, 0, 150)))
+        label_background.setPen(QPen(Qt.PenStyle.NoPen))
+        label_background.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        label_background.setZValue(0)
 
         text = QGraphicsTextItem(label, self)
-        text.setDefaultTextColor(QColor("#f1f0ff"))
-        text.setFont(QFont("Segoe UI", 9, QFont.Weight.DemiBold))
-        text.setTextWidth(84)
-        text.setPos(-42, -10)
+        text.setDefaultTextColor(text_color)
+        text.setFont(label_font)
+        text.setPos(-text_width / 2 + 5, radius + 3)
+        text.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        text.setZValue(1)
+
+    def itemChange(self, change, value):  # noqa: N802 - Qt API
+        if change == QGraphicsEllipseItem.GraphicsItemChange.ItemPositionHasChanged:
+            for edge in self.edges:
+                edge.update_position()
+        return super().itemChange(change, value)
 
     def mousePressEvent(self, event) -> None:
-        self.on_open(self.reference)
+        self._press_pos = event.scenePos()
+        self.pinned = True
         super().mousePressEvent(event)
 
+    def mouseReleaseEvent(self, event) -> None:
+        super().mouseReleaseEvent(event)
+        self.pinned = False
+        moved = self._press_pos is not None and (
+            (event.scenePos() - self._press_pos).manhattanLength() > self.CLICK_DRAG_THRESHOLD
+        )
+        self._press_pos = None
+        if moved:
+            if self.on_drag_end is not None:
+                self.on_drag_end()
+        else:
+            self.on_open(self.reference)
+
     def hoverEnterEvent(self, event) -> None:
-        self.setBrush(QBrush(QColor("#3b3560")))
+        self.setBrush(QBrush(self._hover_color))
+        if self.on_hover is not None:
+            self.on_hover(self, True)
         super().hoverEnterEvent(event)
 
     def hoverLeaveEvent(self, event) -> None:
-        self.setBrush(QBrush(QColor("#25233b")))
+        self.setBrush(QBrush(self._base_color))
+        if self.on_hover is not None:
+            self.on_hover(self, False)
         super().hoverLeaveEvent(event)
+
+
+class GraphEdgeItem(QGraphicsLineItem):
+    """Line between two graph nodes that follows them as they move."""
+
+    def __init__(self, source: GraphNodeItem, target: GraphNodeItem, pen: QPen) -> None:
+        super().__init__()
+        self.source = source
+        self.target = target
+        self.setPen(pen)
+        self.update_position()
+
+    def update_position(self) -> None:
+        self.setLine(self.source.x(), self.source.y(), self.target.x(), self.target.y())
+
+
+class GraphForceSimulation:
+    """Force-directed layout that settles on load and reheats when a node is dragged."""
+
+    TICK_INTERVAL_MS = 16
+    SETTLE_TICKS = 200
+    WAKE_TICKS = 90
+
+    def __init__(self, timer_parent) -> None:
+        self.nodes: list[GraphNodeItem] = []
+        self.edges: list[GraphEdgeItem] = []
+        self._timer = QTimer(timer_parent)
+        self._timer.timeout.connect(self._tick)
+        self._remaining_ticks = 0
+
+    def set_graph(self, nodes: list[GraphNodeItem], edges: list[GraphEdgeItem]) -> None:
+        self.stop()
+        self.nodes = nodes
+        self.edges = edges
+        for node in nodes:
+            node.vx = 0.0
+            node.vy = 0.0
+        self.wake(self.SETTLE_TICKS)
+
+    def wake(self, ticks: int = WAKE_TICKS) -> None:
+        self._remaining_ticks = max(self._remaining_ticks, ticks)
+        if self.nodes and not self._timer.isActive():
+            self._timer.start(self.TICK_INTERVAL_MS)
+
+    def stop(self) -> None:
+        self._timer.stop()
+        self._remaining_ticks = 0
+        self.nodes = []
+        self.edges = []
+
+    def _tick(self) -> None:
+        if self._remaining_ticks <= 0 or len(self.nodes) < 2:
+            self._timer.stop()
+            return
+        self._remaining_ticks -= 1
+
+        repulsion = 14000.0
+        spring_length = 150.0
+        spring_strength = 0.02
+        damping = 0.82
+        center_pull = 0.002
+
+        forces = {node: [0.0, 0.0] for node in self.nodes}
+        for index, node_a in enumerate(self.nodes):
+            for node_b in self.nodes[index + 1 :]:
+                dx = node_a.x() - node_b.x()
+                dy = node_a.y() - node_b.y()
+                distance_sq = max(dx * dx + dy * dy, 1.0)
+                distance = distance_sq ** 0.5
+                force = repulsion / distance_sq
+                fx = force * dx / distance
+                fy = force * dy / distance
+                forces[node_a][0] += fx
+                forces[node_a][1] += fy
+                forces[node_b][0] -= fx
+                forces[node_b][1] -= fy
+
+        for edge in self.edges:
+            dx = edge.target.x() - edge.source.x()
+            dy = edge.target.y() - edge.source.y()
+            distance = max((dx * dx + dy * dy) ** 0.5, 1.0)
+            displacement = distance - spring_length
+            fx = spring_strength * displacement * dx / distance
+            fy = spring_strength * displacement * dy / distance
+            forces[edge.source][0] += fx
+            forces[edge.source][1] += fy
+            forces[edge.target][0] -= fx
+            forces[edge.target][1] -= fy
+
+        still_moving = False
+        for node in self.nodes:
+            if node.pinned:
+                node.vx = 0.0
+                node.vy = 0.0
+                continue
+            fx, fy = forces[node]
+            fx -= node.x() * center_pull
+            fy -= node.y() * center_pull
+            node.vx = (node.vx + fx) * damping
+            node.vy = (node.vy + fy) * damping
+            if abs(node.vx) > 0.05 or abs(node.vy) > 0.05:
+                node.setPos(node.x() + node.vx, node.y() + node.vy)
+                still_moving = True
+
+        if not still_moving:
+            self._remaining_ticks = 0
+
+
+class VaultGraphView(QGraphicsView):
+    """Graphics view supporting click-drag panning and wheel-zoom for graph navigation."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 - Qt API
+        zoom_factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
+        self.scale(zoom_factor, zoom_factor)
+
+
+class GraphSurface:
+    """Bundles a graph's scene, view, and physics so multiple graphs can render independently."""
+
+    def __init__(self, scene: QGraphicsScene, view: VaultGraphView, simulation: "GraphForceSimulation") -> None:
+        self.scene = scene
+        self.view = view
+        self.simulation = simulation
+        self.nodes: dict[str, GraphNodeItem] = {}
+        self.edges: list[GraphEdgeItem] = []
+
+
+class GraphTabWidget(QWidget):
+    """Full-vault graph shown as its own note-editor tab, like Obsidian's graph view."""
+
+    def __init__(self, window: "MainWindow") -> None:
+        super().__init__()
+        self.window = window
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        controls = QHBoxLayout()
+        controls.setSpacing(6)
+        title = QLabel("Full Vault Graph")
+        title.setStyleSheet("QLabel { color: #8f8991; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }")
+        self.tag_filter = QComboBox()
+        self.tag_filter.setToolTip("Filter the graph by tag")
+        self.tag_filter.addItem("All tags", "")
+        self.tag_filter.currentIndexChanged.connect(self.refresh)
+        self.path_filter = QComboBox()
+        self.path_filter.setToolTip("Filter the graph by folder")
+        self.path_filter.addItem("All paths", "")
+        self.path_filter.currentIndexChanged.connect(self.refresh)
+        controls.addWidget(title)
+        controls.addStretch()
+        controls.addWidget(self.tag_filter)
+        controls.addWidget(self.path_filter)
+        layout.addLayout(controls)
+
+        self.view = VaultGraphView()
+        self.scene = QGraphicsScene(self)
+        self.view.setScene(self.scene)
+        self.view.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.view.setStyleSheet(
+            "QGraphicsView { background: #1f1f1f; border: 1px solid #454047; border-radius: 6px; }"
+        )
+        layout.addWidget(self.view, 1)
+
+        self.simulation = GraphForceSimulation(self.view)
+        self.surface = GraphSurface(self.scene, self.view, self.simulation)
+
+    def refresh(self, _index: int = -1) -> None:
+        self.window._render_full_vault_graph_into(self)
+
+    def stop(self) -> None:
+        self.simulation.stop()
 
 
 class VaultFileWatcher(FileSystemEventHandler):
@@ -259,6 +505,7 @@ class MainWindow(QMainWindow):
         self._note_history_index = -1
         self._history_navigation = False
         self._selected_folder_path: Path | None = None
+        self._graph_tab_page: GraphTabWidget | None = None
         self._observer: Observer | None = None
         self._watcher: VaultFileWatcher | None = None
         self._closing = False
@@ -841,7 +1088,7 @@ class MainWindow(QMainWindow):
         self.outgoing_list = QListWidget()
         self.outgoing_list.setMinimumHeight(100)
         self.outgoing_list.itemDoubleClicked.connect(self._on_list_item_open)
-        self.graph_view = QGraphicsView()
+        self.graph_view = VaultGraphView()
         self.graph_scene = QGraphicsScene(self)
         self.graph_view.setScene(self.graph_scene)
         self.graph_view.setMinimumHeight(210)
@@ -851,6 +1098,8 @@ class MainWindow(QMainWindow):
         self.graph_view.setStyleSheet(
             "QGraphicsView { background: #1f1f1f; border: 1px solid #454047; border-radius: 6px; }"
         )
+        self._graph_simulation = GraphForceSimulation(self.graph_view)
+        self._graph_surface = GraphSurface(self.graph_scene, self.graph_view, self._graph_simulation)
         self.graph_list = QListWidget()
         self.graph_list.setVisible(False)
         self.graph_list.itemDoubleClicked.connect(self._on_list_item_open)
@@ -858,9 +1107,19 @@ class MainWindow(QMainWindow):
         self.outgoing_label.setStyleSheet("QLabel { color: #8f8991; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }")
         self.graph_label = QLabel("Connected Notes")
         self.graph_label.setStyleSheet("QLabel { color: #8f8991; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }")
+        self.graph_scope_button = QPushButton("Full vault graph")
+        self.graph_scope_button.setFixedHeight(26)
+        self.graph_scope_button.setToolTip("Open the full vault graph in a new tab")
+        self.graph_scope_button.clicked.connect(self._open_full_graph_tab)
+        self.graph_controls_layout = QHBoxLayout()
+        self.graph_controls_layout.setContentsMargins(0, 0, 0, 0)
+        self.graph_controls_layout.setSpacing(6)
+        self.graph_controls_layout.addWidget(self.graph_label)
+        self.graph_controls_layout.addStretch()
+        self.graph_controls_layout.addWidget(self.graph_scope_button)
         self.connected_layout.addWidget(self.outgoing_label)
         self.connected_layout.addWidget(self.outgoing_list)
-        self.connected_layout.addWidget(self.graph_label)
+        self.connected_layout.addLayout(self.graph_controls_layout)
         self.connected_layout.addWidget(self.graph_view)
         self.connected_layout.addWidget(self.graph_list)
 
@@ -874,8 +1133,17 @@ class MainWindow(QMainWindow):
         self.tag_list.itemDoubleClicked.connect(self._on_tag_clicked)
         self.tags_label = QLabel("Tags")
         self.tags_label.setStyleSheet("QLabel { color: #8f8991; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }")
+        self.tag_matches_label = QLabel("")
+        self.tag_matches_label.setStyleSheet("QLabel { color: #8f8991; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }")
+        self.tag_matches_label.setVisible(False)
+        self.tag_matches_list = QListWidget()
+        self.tag_matches_list.setMinimumHeight(120)
+        self.tag_matches_list.itemDoubleClicked.connect(self._on_tag_match_open)
+        self.tag_matches_list.setVisible(False)
         self.tag_layout.addWidget(self.tags_label)
         self.tag_layout.addWidget(self.tag_list)
+        self.tag_layout.addWidget(self.tag_matches_label)
+        self.tag_layout.addWidget(self.tag_matches_list)
 
         self.properties_panel = QWidget()
         self.properties_panel.setObjectName("drawer")
@@ -977,19 +1245,23 @@ class MainWindow(QMainWindow):
         if self.current_note_path is not None and self.current_note_path.exists():
             self._open_note_file(self.current_note_path)
 
+    def _populate_filter_combo(
+        self, combo: QComboBox, all_label: str, options: list[str], prefix: str = ""
+    ) -> None:
+        selected = combo.currentData()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(all_label, "")
+        for option in options:
+            combo.addItem(f"{prefix}{option}", option)
+        combo.setCurrentIndex(max(0, combo.findData(selected)))
+        combo.blockSignals(False)
+
     def _refresh_search_index(self) -> None:
         if self.vault is None:
             return
         refresh_search_index(self.vault.path, self.vault)
 
-        selected_tag = self.search_tag_filter.currentData()
-        selected_path = self.search_path_filter.currentData()
-        self.search_tag_filter.blockSignals(True)
-        self.search_path_filter.blockSignals(True)
-        self.search_tag_filter.clear()
-        self.search_path_filter.clear()
-        self.search_tag_filter.addItem("All tags", "")
-        self.search_path_filter.addItem("All paths", "")
         tags = sorted({tag for note in self.vault.notes.values() for tag in note.tags}, key=str.lower)
         paths = sorted(
             {
@@ -999,16 +1271,8 @@ class MainWindow(QMainWindow):
             },
             key=str.lower,
         )
-        for tag in tags:
-            self.search_tag_filter.addItem(f"#{tag}", tag)
-        for path in paths:
-            self.search_path_filter.addItem(path, path)
-        tag_index = self.search_tag_filter.findData(selected_tag)
-        path_index = self.search_path_filter.findData(selected_path)
-        self.search_tag_filter.setCurrentIndex(max(0, tag_index))
-        self.search_path_filter.setCurrentIndex(max(0, path_index))
-        self.search_tag_filter.blockSignals(False)
-        self.search_path_filter.blockSignals(False)
+        self._populate_filter_combo(self.search_tag_filter, "All tags", tags, prefix="#")
+        self._populate_filter_combo(self.search_path_filter, "All paths", paths)
 
     def _add_search_result(self, result: dict[str, str], suggested: bool = False) -> None:
         title = result.get("title", "Untitled")
@@ -1505,6 +1769,10 @@ class MainWindow(QMainWindow):
                 self.outgoing_list.clear()
                 self.graph_list.clear()
                 self.tag_list.clear()
+                self.tag_matches_list.clear()
+                self.tag_matches_label.setVisible(False)
+                self.tag_matches_list.setVisible(False)
+                self._refresh_graph_panel()
             except ValueError:
                 pass
         if self._selected_folder_path is not None:
@@ -1664,6 +1932,9 @@ class MainWindow(QMainWindow):
         self._add_empty_folder_indicators(root_item)
         self.note_tree.expandAll()
         self._refresh_search_index()
+        self._refresh_graph_panel()
+        if self._graph_tab_page is not None:
+            self._graph_tab_page.refresh()
 
     def _add_empty_folder_indicators(self, item: QTreeWidgetItem) -> None:
         is_directory = bool(item.data(0, VaultTreeWidget.IS_DIRECTORY_ROLE))
@@ -1803,11 +2074,18 @@ class MainWindow(QMainWindow):
             self.outgoing_list.clear()
             self.graph_list.clear()
             self.tag_list.clear()
+            self.tag_matches_list.clear()
+            self.tag_matches_label.setVisible(False)
+            self.tag_matches_list.setVisible(False)
             self.editor = self._create_note_editor()
             self._update_history_buttons()
+            self._refresh_graph_panel()
             return
 
         page = self.note_tabs.widget(index)
+        if isinstance(page, GraphTabWidget):
+            page.refresh()
+            return
         path_value = page.property("notePath")
         if not path_value:
             return
@@ -1827,6 +2105,8 @@ class MainWindow(QMainWindow):
             return
         for index in range(self.note_tabs.count()):
             page = self.note_tabs.widget(index)
+            if not page.property("notePath"):
+                continue
             old_path = Path(page.property("notePath"))
             try:
                 old_relative = old_path.relative_to(self.vault.path).as_posix()
@@ -1865,6 +2145,7 @@ class MainWindow(QMainWindow):
             page = self.note_tabs.widget(0)
             self.note_tabs.removeTab(0)
             page.deleteLater()
+        self._graph_tab_page = None
         self.current_note_path = None
         self._note_history.clear()
         self._note_history_index = -1
@@ -1873,6 +2154,9 @@ class MainWindow(QMainWindow):
 
     def _close_note_tab(self, index: int) -> None:
         page = self.note_tabs.widget(index)
+        if isinstance(page, GraphTabWidget):
+            self._close_graph_tab()
+            return
         editor = self._tab_editor(page)
         if editor.document().isModified():
             answer = QMessageBox.question(
@@ -1898,6 +2182,55 @@ class MainWindow(QMainWindow):
         index = self.note_tabs.indexOf(page)
         if index >= 0:
             self._close_note_tab(index)
+
+    def _add_tab_close_button(self, index: int, page: QWidget, tooltip: str, on_close) -> None:
+        close_button = QToolButton(self.note_tabs.tabBar())
+        close_button.setIcon(_sidebar_action_icon("close"))
+        close_button.setIconSize(QSize(12, 12))
+        close_button.setFixedSize(20, 20)
+        close_button.setAutoRaise(True)
+        close_button.setToolTip(tooltip)
+        close_button.setStyleSheet(
+            "QToolButton { background: transparent; border: 0; padding: 2px; }"
+            "QToolButton:hover { background: #3b383d; border-radius: 4px; }"
+        )
+        close_button.clicked.connect(lambda _checked=False: on_close(page))
+        self.note_tabs.tabBar().setTabButton(
+            index, QTabBar.ButtonPosition.RightSide, close_button
+        )
+
+    def _open_full_graph_tab(self) -> None:
+        if self.vault is None:
+            QMessageBox.warning(self, "No vault", "Select a vault before opening the graph.")
+            return
+        if self._graph_tab_page is not None:
+            index = self.note_tabs.indexOf(self._graph_tab_page)
+            if index >= 0:
+                self.note_tabs.setCurrentIndex(index)
+                self._graph_tab_page.refresh()
+                return
+            self._graph_tab_page = None
+
+        page = GraphTabWidget(self)
+        index = self.note_tabs.addTab(page, "Graph")
+        self.note_tabs.setTabToolTip(index, "Full vault graph")
+        self._add_tab_close_button(
+            index, page, "Close graph", lambda _page: self._close_graph_tab()
+        )
+        self._graph_tab_page = page
+        self.note_tabs.setCurrentIndex(index)
+        page.refresh()
+
+    def _close_graph_tab(self) -> None:
+        if self._graph_tab_page is None:
+            return
+        page = self._graph_tab_page
+        self._graph_tab_page = None
+        index = self.note_tabs.indexOf(page)
+        if index >= 0:
+            self.note_tabs.removeTab(index)
+        page.stop()
+        page.deleteLater()
 
     def _open_note_file(self, file_path: Path) -> None:
         if not file_path.exists():
@@ -1931,22 +2264,7 @@ class MainWindow(QMainWindow):
         )
         index = self.note_tabs.addTab(page, file_path.stem)
         self.note_tabs.setTabToolTip(index, relative_path)
-        close_button = QToolButton(self.note_tabs.tabBar())
-        close_button.setIcon(_sidebar_action_icon("close"))
-        close_button.setIconSize(QSize(12, 12))
-        close_button.setFixedSize(20, 20)
-        close_button.setAutoRaise(True)
-        close_button.setToolTip("Close note")
-        close_button.setStyleSheet(
-            "QToolButton { background: transparent; border: 0; padding: 2px; }"
-            "QToolButton:hover { background: #3b383d; border-radius: 4px; }"
-        )
-        close_button.clicked.connect(
-            lambda _checked=False, tab_page=page: self._close_note_page(tab_page)
-        )
-        self.note_tabs.tabBar().setTabButton(
-            index, QTabBar.ButtonPosition.RightSide, close_button
-        )
+        self._add_tab_close_button(index, page, "Close note", self._close_note_page)
         self.note_tabs.setCurrentIndex(index)
 
     def _refresh_related_lists(self) -> None:
@@ -1967,7 +2285,10 @@ class MainWindow(QMainWindow):
         self.outgoing_list.clear()
         self.graph_list.clear()
         self.tag_list.clear()
-        self._refresh_graph(note.title, note.backlinks, note.outgoing_links)
+        self.tag_matches_list.clear()
+        self.tag_matches_label.setVisible(False)
+        self.tag_matches_list.setVisible(False)
+        self._refresh_graph_panel()
 
         for backlink in note.backlinks:
             self.backlinks_list.addItem(backlink)
@@ -2064,55 +2385,194 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Properties applied. Save to write changes.")
         return True
 
-    def _refresh_graph(self, title: str, backlinks: list[str], outgoing: list[str]) -> None:
-        self.graph_scene.clear()
-        center = self.graph_scene.addEllipse(
-            -58,
-            -28,
-            116,
-            56,
-            QPen(QColor("#d7a84b"), 2),
-            QBrush(QColor("#4b3920")),
-        )
-        center.setZValue(2)
-        center_label = self.graph_scene.addText(title, QFont("Segoe UI", 10, QFont.Weight.Bold))
-        center_label.setDefaultTextColor(QColor("#fff4d1"))
-        center_label.setTextWidth(104)
-        center_label.setPos(-52, -10)
-        center_label.setZValue(3)
-
-        related: list[tuple[str, str, QColor]] = []
-        for reference in backlinks:
-            related.append((reference, "backlink", QColor("#62b6cb")))
-        for reference in outgoing:
-            if reference not in {item[0] for item in related}:
-                related.append((reference, "outgoing", QColor("#c77dff")))
-
-        if not related:
-            empty_label = self.graph_scene.addText("No connected notes", QFont("Segoe UI", 9))
-            empty_label.setDefaultTextColor(QColor("#89899a"))
-            empty_label.setPos(-58, 58)
-            self.graph_scene.setSceneRect(-120, -90, 240, 180)
-            self.graph_view.fitInView(self.graph_scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+    def _refresh_graph_panel(self) -> None:
+        if not hasattr(self, "graph_scene"):
+            return
+        if self.vault is None:
+            self.graph_scene.clear()
+            self._graph_simulation.stop()
+            return
+        if self.current_note_path is None:
+            self.graph_scene.clear()
+            self._graph_simulation.stop()
+            return
+        rel_path = self.current_note_path.relative_to(self.vault.path).as_posix()
+        note = self.vault.notes.get(rel_path)
+        if note is None:
             return
 
-        radius = 82
-        import math
+        node_entries = [(rel_path, note.title)]
+        edge_pairs: list[tuple[str, str]] = []
+        seen = {rel_path}
+        for reference in note.backlinks + note.outgoing_links:
+            if reference in seen:
+                continue
+            seen.add(reference)
+            related_note = self.vault.notes.get(reference)
+            node_entries.append((reference, related_note.title if related_note else Path(reference).stem))
+            edge_pairs.append((rel_path, reference))
+        self._render_graph(self._graph_surface, node_entries, edge_pairs, rel_path)
 
-        for index, (reference, _kind, color) in enumerate(related):
-            angle = (2 * math.pi * index / len(related)) - math.pi / 2
-            x = math.cos(angle) * radius
-            y = math.sin(angle) * radius
-            edge = self.graph_scene.addLine(0, 0, x, y, QPen(color, 2))
-            edge.setZValue(0)
-            node = GraphNodeItem(Path(reference).stem, reference, self._open_note_from_reference)
-            node.setPen(QPen(color, 2))
-            node.setPos(x, y)
+    def _render_full_vault_graph_into(self, page: "GraphTabWidget") -> None:
+        if self.vault is None:
+            self._render_graph(page.surface, [], [], None, empty_message="No vault selected")
+            return
+
+        tags = sorted({tag for note in self.vault.notes.values() for tag in note.tags}, key=str.lower)
+        paths = sorted(
+            {
+                parent.as_posix()
+                for relative_path in self.vault.notes
+                if (parent := Path(relative_path).parent).as_posix() != "."
+            },
+            key=str.lower,
+        )
+        self._populate_filter_combo(page.tag_filter, "All tags", tags, prefix="#")
+        self._populate_filter_combo(page.path_filter, "All paths", paths)
+
+        if not self.vault.notes:
+            self._render_graph(page.surface, [], [], None, empty_message="No notes in this vault")
+            return
+
+        tag_filter = page.tag_filter.currentData() or ""
+        path_filter = (page.path_filter.currentData() or "").strip("/")
+
+        def included(relative_path: str, note) -> bool:
+            if tag_filter and tag_filter not in note.tags:
+                return False
+            if path_filter and not (
+                relative_path == path_filter or relative_path.startswith(f"{path_filter}/")
+            ):
+                return False
+            return True
+
+        filtered = {
+            relative_path: note
+            for relative_path, note in self.vault.notes.items()
+            if included(relative_path, note)
+        }
+        if not filtered:
+            self._render_graph(page.surface, [], [], None, empty_message="No notes match the current filters")
+            return
+
+        node_entries = [(relative_path, note.title) for relative_path, note in filtered.items()]
+        edge_pairs = [
+            (relative_path, target)
+            for relative_path, note in filtered.items()
+            for target in note.outgoing_links
+            if target in filtered
+        ]
+
+        current_relative = None
+        if self.current_note_path is not None:
+            try:
+                current_relative = self.current_note_path.relative_to(self.vault.path).as_posix()
+            except ValueError:
+                current_relative = None
+
+        self._render_graph(page.surface, node_entries, edge_pairs, current_relative)
+
+    def _render_graph(
+        self,
+        surface: GraphSurface,
+        node_entries: list[tuple[str, str]],
+        edge_pairs: list[tuple[str, str]],
+        current_reference: str | None,
+        empty_message: str = "No connected notes",
+    ) -> None:
+        surface.scene.clear()
+        surface.simulation.stop()
+        surface.nodes = {}
+        surface.edges = []
+        if not node_entries:
+            self._show_empty_graph_message(surface, empty_message)
+            return
+
+        degree: dict[str, int] = {reference: 0 for reference, _label in node_entries}
+        for source, target in edge_pairs:
+            if source in degree:
+                degree[source] += 1
+            if target in degree:
+                degree[target] += 1
+
+        graph = nx.Graph()
+        graph.add_nodes_from(degree)
+        graph.add_edges_from(pair for pair in edge_pairs if pair[0] in degree and pair[1] in degree)
+
+        if len(degree) == 1:
+            positions = {next(iter(degree)): (0.0, 0.0)}
+        else:
+            positions = nx.spring_layout(graph, seed=7, k=1.4 / (len(degree) ** 0.5))
+
+        scale = 200.0
+        nodes: dict[str, GraphNodeItem] = {}
+        for reference, label in node_entries:
+            is_current = reference == current_reference
+            node = GraphNodeItem(
+                label,
+                reference,
+                self._open_note_from_reference,
+                on_hover=lambda node, entering, surface=surface: self._on_graph_node_hover(surface, node, entering),
+                on_drag_end=surface.simulation.wake,
+                radius=14 + min(16, degree.get(reference, 0) * 3),
+                base_color=QColor("#4b3920") if is_current else QColor("#25233b"),
+                hover_color=QColor("#5c4626") if is_current else QColor("#3b3560"),
+                border_color=QColor("#d7a84b") if is_current else QColor("#8176e8"),
+                text_color=QColor("#fff4d1") if is_current else QColor("#d7d4dc"),
+            )
+            x, y = positions.get(reference, (0.0, 0.0))
+            node.setPos(x * scale, y * scale)
+            nodes[reference] = node
+            surface.scene.addItem(node)
+
+        edges: list[GraphEdgeItem] = []
+        edge_pen = QPen(QColor("#4b4658"), 1.4)
+        for source, target in graph.edges():
+            edge = GraphEdgeItem(nodes[source], nodes[target], edge_pen)
+            nodes[source].edges.append(edge)
+            nodes[target].edges.append(edge)
+            surface.scene.addItem(edge)
+            edges.append(edge)
+        for node in nodes.values():
             node.setZValue(2)
-            self.graph_scene.addItem(node)
 
-        self.graph_scene.setSceneRect(-150, -145, 300, 290)
-        self.graph_view.fitInView(self.graph_scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        surface.nodes = nodes
+        surface.edges = edges
+        surface.simulation.set_graph(list(nodes.values()), edges)
+
+        positions_px = [(node.x(), node.y()) for node in nodes.values()]
+        margin = 90
+        min_x = min(x for x, _ in positions_px) - margin
+        max_x = max(x for x, _ in positions_px) + margin
+        min_y = min(y for _, y in positions_px) - margin
+        max_y = max(y for _, y in positions_px) + margin
+        surface.scene.setSceneRect(min_x, min_y, max_x - min_x, max_y - min_y)
+        surface.view.fitInView(surface.scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+    def _on_graph_node_hover(self, surface: GraphSurface, node: GraphNodeItem, entering: bool) -> None:
+        if entering:
+            connected = {node}
+            for edge in surface.edges:
+                if edge.source is node:
+                    connected.add(edge.target)
+                elif edge.target is node:
+                    connected.add(edge.source)
+            for other in surface.nodes.values():
+                other.setOpacity(1.0 if other in connected else 0.25)
+            for edge in surface.edges:
+                edge.setOpacity(1.0 if edge.source in connected and edge.target in connected else 0.12)
+        else:
+            for other in surface.nodes.values():
+                other.setOpacity(1.0)
+            for edge in surface.edges:
+                edge.setOpacity(1.0)
+
+    def _show_empty_graph_message(self, surface: GraphSurface, message: str) -> None:
+        empty_label = surface.scene.addText(message, QFont("Segoe UI", 9))
+        empty_label.setDefaultTextColor(QColor("#89899a"))
+        empty_label.setPos(-len(message) * 3, -8)
+        surface.scene.setSceneRect(-150, -90, 300, 180)
+        surface.view.fitInView(surface.scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
 
     def _on_list_item_open(self, item) -> None:
         text = item.text()
@@ -2130,8 +2590,32 @@ class MainWindow(QMainWindow):
         text = item.text()
         if not text or text == "No tags":
             return
-        self.search_input.setText(text)
-        self.perform_search()
+        self._show_tag_matches(text.lstrip("#"))
+
+    def _show_tag_matches(self, tag: str) -> None:
+        self.tag_matches_list.clear()
+        if self.vault is None:
+            return
+        matches = sorted(
+            (
+                (note.title, relative_path)
+                for relative_path, note in self.vault.notes.items()
+                if tag in note.tags
+            ),
+            key=lambda entry: entry[0].lower(),
+        )
+        for title, relative_path in matches:
+            list_item = QListWidgetItem(f"{title}\n{relative_path}")
+            list_item.setData(Qt.ItemDataRole.UserRole, relative_path)
+            self.tag_matches_list.addItem(list_item)
+        self.tag_matches_label.setText(f"Notes tagged #{tag} ({len(matches)})")
+        self.tag_matches_label.setVisible(True)
+        self.tag_matches_list.setVisible(True)
+
+    def _on_tag_match_open(self, item: QListWidgetItem) -> None:
+        relative_path = item.data(Qt.ItemDataRole.UserRole)
+        if relative_path and self.vault is not None:
+            self._open_note_file(self.vault.path / relative_path)
 
     def _open_note_from_reference(self, reference: str) -> None:
         if self.vault is None:
