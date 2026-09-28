@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 from pathlib import Path
 
@@ -65,7 +66,17 @@ def extract_frontmatter(text: str) -> tuple[dict[str, str], str]:
     def flush_list() -> None:
         nonlocal current_key, list_buffer
         if current_key is not None:
-            metadata[current_key] = ", ".join(list_buffer)
+            parsed_values: list[str] = []
+            for value in list_buffer:
+                if value.startswith('"'):
+                    try:
+                        value = str(json.loads(value))
+                    except json.JSONDecodeError:
+                        pass
+                elif value.startswith("'") and value.endswith("'"):
+                    value = value[1:-1].replace("''", "'")
+                parsed_values.append(value)
+            metadata[current_key] = ", ".join(parsed_values)
             current_key = None
             list_buffer = []
 
@@ -88,6 +99,20 @@ def extract_frontmatter(text: str) -> tuple[dict[str, str], str]:
             key = key.strip()
             value = value.strip()
             if value:
+                if value.startswith('"'):
+                    try:
+                        value = str(json.loads(value))
+                    except json.JSONDecodeError:
+                        pass
+                elif value.startswith("'") and value.endswith("'"):
+                    value = value[1:-1].replace("''", "'")
+                elif value.startswith("[") and value.endswith("]"):
+                    try:
+                        parsed_list = json.loads(value)
+                        if isinstance(parsed_list, list):
+                            value = ", ".join(str(item) for item in parsed_list)
+                    except json.JSONDecodeError:
+                        pass
                 metadata[key] = value
             else:
                 current_key = key
@@ -95,6 +120,37 @@ def extract_frontmatter(text: str) -> tuple[dict[str, str], str]:
 
     flush_list()
     return metadata, body
+
+
+def set_frontmatter(text: str, metadata: dict[str, str]) -> str:
+    _, body = extract_frontmatter(text)
+    if not metadata:
+        return body
+
+    lines = ["---"]
+    list_properties = {"tags", "aliases", "cssclasses"}
+    for raw_key, raw_value in metadata.items():
+        key = raw_key.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", key):
+            raise ValueError(f"Invalid frontmatter property name: {raw_key}")
+        value = str(raw_value)
+        if key.lower() in list_properties:
+            values = [item.strip() for item in value.split(",") if item.strip()]
+            if values:
+                lines.append(f"{key}:")
+                lines.extend(f"  - {json.dumps(item, ensure_ascii=False)}" for item in values)
+            else:
+                lines.append(f"{key}: []")
+        elif re.fullmatch(
+            r"(?:true|false|null|[-+]?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][-+]?\d+)?|\d{4}-\d{2}-\d{2})",
+            value,
+            flags=re.IGNORECASE,
+        ):
+            lines.append(f"{key}: {value}")
+        else:
+            lines.append(f"{key}: {json.dumps(value, ensure_ascii=False)}")
+    lines.append("---")
+    return "\n".join(lines) + "\n" + body
 
 
 def extract_title(text: str, fallback: str) -> str:

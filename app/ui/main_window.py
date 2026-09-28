@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import shutil
+from datetime import date, datetime
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QSize, QTimer, Qt, Signal
@@ -23,9 +24,12 @@ from PySide6.QtWidgets import (
     QGraphicsScene,
     QGraphicsTextItem,
     QGraphicsView,
+    QHeaderView,
     QSplitter,
     QTabBar,
     QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTextEdit,
     QToolButton,
     QTreeWidget,
@@ -35,11 +39,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.core.markdown import extract_frontmatter, set_frontmatter
 from app.core.search import fuzzy_note_results, refresh_search_index, search_notes
 from app.core.vault import Vault
 from app.ui.markdown_editor import MarkdownEditor
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
+
+
+DAILY_NOTES_FOLDER = "Daily Notes"
+TEMPLATES_FOLDER = "Templates"
 
 
 def _sidebar_action_icon(kind: str) -> QIcon:
@@ -117,6 +126,27 @@ def _sidebar_action_icon(kind: str) -> QIcon:
     elif kind == "close":
         painter.drawLine(6, 6, 18, 18)
         painter.drawLine(18, 6, 6, 18)
+    elif kind == "calendar":
+        painter.drawRect(4, 5, 16, 16)
+        painter.drawLine(4, 9, 20, 9)
+        painter.drawLine(8, 3, 8, 7)
+        painter.drawLine(16, 3, 16, 7)
+        painter.drawLine(8, 12, 8, 12)
+        painter.drawLine(12, 12, 12, 12)
+        painter.drawLine(16, 12, 16, 12)
+    elif kind == "template":
+        path = QPainterPath()
+        path.moveTo(6, 3)
+        path.lineTo(14, 3)
+        path.lineTo(19, 8)
+        path.lineTo(19, 21)
+        path.lineTo(6, 21)
+        path.closeSubpath()
+        painter.drawPath(path)
+        painter.drawLine(14, 3, 14, 8)
+        painter.drawLine(14, 8, 19, 8)
+        painter.drawLine(9, 12, 16, 12)
+        painter.drawLine(9, 16, 16, 16)
 
     painter.end()
     return QIcon(pixmap)
@@ -651,12 +681,21 @@ class MainWindow(QMainWindow):
         self.save_note_button = QPushButton("Save")
         self.save_note_button.clicked.connect(self.save_current_note)
         self.save_note_button.setFixedHeight(32)
+        self.daily_note_button = QPushButton("Daily note")
+        self.daily_note_button.clicked.connect(lambda: self.create_daily_note())
+        self.daily_note_button.setFixedHeight(32)
+
+        self.insert_template_button = QPushButton("Insert template")
+        self.insert_template_button.clicked.connect(lambda: self._choose_template())
+        self.insert_template_button.setFixedHeight(32)
 
         sidebar_actions = (
             (self.select_vault_button, "vault", "Open vault"),
             (self.new_note_button, "note", "New note"),
             (self.new_folder_button, "folder", "New folder"),
             (self.save_note_button, "save", "Save note"),
+            (self.daily_note_button, "calendar", "Create daily note"),
+            (self.insert_template_button, "template", "Insert template"),
         )
         for button, icon_kind, label in sidebar_actions:
             button.setText("")
@@ -673,7 +712,7 @@ class MainWindow(QMainWindow):
             )
 
         action_row = QHBoxLayout()
-        action_row.setSpacing(8)
+        action_row.setSpacing(4)
         action_row.addWidget(self.select_vault_button)
         action_row.addWidget(self.new_note_button)
         action_row.addWidget(self.new_folder_button)
@@ -838,9 +877,41 @@ class MainWindow(QMainWindow):
         self.tag_layout.addWidget(self.tags_label)
         self.tag_layout.addWidget(self.tag_list)
 
+        self.properties_panel = QWidget()
+        self.properties_panel.setObjectName("drawer")
+        self.properties_layout = QVBoxLayout(self.properties_panel)
+        self.properties_layout.setContentsMargins(8, 8, 8, 8)
+        self.properties_layout.setSpacing(8)
+        self.properties_table = QTableWidget(0, 2)
+        self.properties_table.setHorizontalHeaderLabels(["Property", "Value"])
+        self.properties_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.properties_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch
+        )
+        self.properties_table.verticalHeader().setVisible(False)
+        self.properties_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        property_actions = QHBoxLayout()
+        self.add_property_button = QPushButton("Add")
+        self.add_property_button.clicked.connect(self._add_property_row)
+        self.remove_property_button = QPushButton("Remove")
+        self.remove_property_button.clicked.connect(self._remove_property_row)
+        self.apply_properties_button = QPushButton("Apply")
+        self.apply_properties_button.clicked.connect(self._apply_properties_to_note)
+        property_actions.addWidget(self.add_property_button)
+        property_actions.addWidget(self.remove_property_button)
+        property_actions.addStretch()
+        property_actions.addWidget(self.apply_properties_button)
+        self.properties_layout.addLayout(property_actions)
+        self.properties_layout.addWidget(self.properties_table, 1)
+
         self.right_tabs.addTab(self.backlinks_panel, "Backlinks")
         self.right_tabs.addTab(self.connected_panel, "Graph")
         self.right_tabs.addTab(self.tag_panel, "Tags")
+        self.right_tabs.addTab(self.properties_panel, "Properties")
         right_panel_layout.addWidget(self.right_tabs)
         self.main_content.addWidget(self.right_panel)
 
@@ -1037,6 +1108,119 @@ class MainWindow(QMainWindow):
                     return True
         return super().eventFilter(watched, event)
 
+    def _available_templates(self) -> list[Path]:
+        if self.vault is None:
+            return []
+        templates_dir = self.vault.path / TEMPLATES_FOLDER
+        if not templates_dir.is_dir():
+            return []
+        return sorted(templates_dir.rglob("*.md"), key=lambda path: path.as_posix().lower())
+
+    def _render_template_content(
+        self,
+        content: str,
+        note_day: date | None = None,
+        title: str | None = None,
+        time_value: str | None = None,
+    ) -> str:
+        current_time = datetime.now()
+        date_value = (note_day or current_time.date()).isoformat()
+        title_value = title or (
+            self.current_note_path.stem if self.current_note_path else date_value
+        )
+        replacements = {
+            "{{date}}": date_value,
+            "{{time}}": time_value or current_time.strftime("%H:%M"),
+            "{{title}}": title_value,
+        }
+        for placeholder, value in replacements.items():
+            content = content.replace(placeholder, value)
+        return content
+
+    def _insert_template_content(
+        self,
+        content: str,
+        note_day: date | None = None,
+        title: str | None = None,
+        time_value: str | None = None,
+    ) -> str:
+        rendered = self._render_template_content(
+            content, note_day=note_day, title=title, time_value=time_value
+        )
+        cursor = self.editor.textCursor()
+        cursor.insertText(rendered)
+        self.editor.setTextCursor(cursor)
+        return rendered
+
+    def _insert_template_file(self, template_path: Path) -> bool:
+        if self.vault is None:
+            return False
+        templates_root = (self.vault.path / TEMPLATES_FOLDER).resolve()
+        try:
+            resolved_path = template_path.resolve()
+            resolved_path.relative_to(templates_root)
+        except (OSError, ValueError):
+            QMessageBox.warning(self, "Invalid template", "Templates must be inside the Templates folder.")
+            return False
+        if not resolved_path.is_file() or resolved_path.suffix.lower() != ".md":
+            return False
+        self._insert_template_content(
+            resolved_path.read_text(encoding="utf-8", errors="replace")
+        )
+        self.status_label.setText(f"Inserted template: {resolved_path.stem}")
+        return True
+
+    def _choose_template(self) -> None:
+        templates = self._available_templates()
+        if not templates:
+            QMessageBox.information(
+                self,
+                "No templates",
+                f"Add Markdown templates under the vault's {TEMPLATES_FOLDER} folder.",
+            )
+            return
+        if self.vault is None:
+            return
+        labels = [path.relative_to(self.vault.path).as_posix() for path in templates]
+        selected, accepted = QInputDialog.getItem(
+            self, "Insert template", "Template:", labels, 0, False
+        )
+        if accepted:
+            self._insert_template_file(self.vault.path / selected)
+
+    def create_daily_note(self, note_day: date | None = None) -> Path | None:
+        if self.vault is None:
+            QMessageBox.warning(self, "No vault", "Select a vault before creating a daily note.")
+            return None
+        day = note_day or date.today()
+        daily_dir = self.vault.path / DAILY_NOTES_FOLDER
+        daily_dir.mkdir(parents=True, exist_ok=True)
+        note_path = daily_dir / f"{day.isoformat()}.md"
+        if not note_path.exists():
+            template = next(
+                (
+                    path
+                    for path in self._available_templates()
+                    if path.stem.lower() in {"daily note", "daily"}
+                ),
+                None,
+            )
+            if template is not None:
+                initial_content = self._render_template_content(
+                    template.read_text(encoding="utf-8", errors="replace"),
+                    note_day=day,
+                    title=day.isoformat(),
+                )
+            else:
+                initial_content = f"# {day.isoformat()}\n\n"
+            note_path.write_text(initial_content, encoding="utf-8")
+        self.vault.refresh()
+        self.populate_note_tree()
+        self._selected_folder_path = daily_dir
+        self._open_note_file(note_path)
+        self.status_label.setText(f"Daily note: {day.isoformat()}")
+        return note_path
+
     def _setup_shortcuts(self) -> None:
         open_vault_action = QAction("Open Vault", self)
         open_vault_action.setShortcut(QKeySequence("Ctrl+O"))
@@ -1052,6 +1236,16 @@ class MainWindow(QMainWindow):
         new_note_action.setShortcut(QKeySequence("Ctrl+N"))
         new_note_action.triggered.connect(self.new_note)
         self.addAction(new_note_action)
+
+        daily_note_action = QAction("Create Daily Note", self)
+        daily_note_action.setShortcut(QKeySequence("Ctrl+Shift+D"))
+        daily_note_action.triggered.connect(lambda: self.create_daily_note())
+        self.addAction(daily_note_action)
+
+        insert_template_action = QAction("Insert Template", self)
+        insert_template_action.setShortcut(QKeySequence("Ctrl+Shift+I"))
+        insert_template_action.triggered.connect(lambda: self._choose_template())
+        self.addAction(insert_template_action)
 
         quick_switcher_action = QAction("Quick Switcher", self)
         quick_switcher_action.setShortcut(QKeySequence("Ctrl+P"))
@@ -1757,12 +1951,16 @@ class MainWindow(QMainWindow):
 
     def _refresh_related_lists(self) -> None:
         if self.vault is None or self.current_note_path is None:
+            if hasattr(self, "properties_table"):
+                self.properties_table.setRowCount(0)
             return
 
         rel_path = self.current_note_path.relative_to(self.vault.path).as_posix()
         note = self.vault.notes.get(rel_path)
         if note is None:
             return
+
+        self._refresh_properties_table()
 
         self.backlinks_list.clear()
         self.unresolved_list.clear()
@@ -1799,6 +1997,72 @@ class MainWindow(QMainWindow):
             self.outgoing_list.addItem("No outgoing links")
         if self.graph_list.count() == 0:
             self.graph_list.addItem("No connected notes")
+
+    def _refresh_properties_table(self) -> None:
+        if self.current_note_path is None:
+            self.properties_table.setRowCount(0)
+            return
+        metadata, _body = extract_frontmatter(self.editor.toPlainText())
+        self.properties_table.setRowCount(0)
+        for key, value in metadata.items():
+            row = self.properties_table.rowCount()
+            self.properties_table.insertRow(row)
+            self.properties_table.setItem(row, 0, QTableWidgetItem(key))
+            self.properties_table.setItem(row, 1, QTableWidgetItem(value))
+
+    def _add_property_row(self) -> None:
+        row = self.properties_table.rowCount()
+        self.properties_table.insertRow(row)
+        self.properties_table.setItem(row, 0, QTableWidgetItem(""))
+        self.properties_table.setItem(row, 1, QTableWidgetItem(""))
+        self.properties_table.setCurrentCell(row, 0)
+        self.properties_table.editItem(self.properties_table.item(row, 0))
+
+    def _remove_property_row(self) -> None:
+        selected_rows = sorted(
+            {index.row() for index in self.properties_table.selectionModel().selectedRows()},
+            reverse=True,
+        )
+        if not selected_rows and self.properties_table.currentRow() >= 0:
+            selected_rows = [self.properties_table.currentRow()]
+        for row in selected_rows:
+            self.properties_table.removeRow(row)
+
+    def _apply_properties_to_note(self) -> bool:
+        if self.current_note_path is None:
+            return False
+        properties: dict[str, str] = {}
+        for row in range(self.properties_table.rowCount()):
+            key_item = self.properties_table.item(row, 0)
+            value_item = self.properties_table.item(row, 1)
+            key = key_item.text().strip() if key_item else ""
+            value = value_item.text() if value_item else ""
+            if not key and not value:
+                continue
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", key):
+                QMessageBox.warning(
+                    self,
+                    "Invalid property",
+                    "Property names must start with a letter or underscore and contain only letters, numbers, underscores, or hyphens.",
+                )
+                return False
+            if key in properties:
+                QMessageBox.warning(
+                    self, "Duplicate property", f"'{key}' appears more than once."
+                )
+                return False
+            properties[key] = value
+
+        try:
+            updated = set_frontmatter(self.editor.toPlainText(), properties)
+        except ValueError as error:
+            QMessageBox.warning(self, "Invalid properties", str(error))
+            return False
+        self.editor.setPlainText(updated)
+        self.editor.document().setModified(True)
+        self._update_note_tab_modified(self.editor, True)
+        self.status_label.setText("Properties applied. Save to write changes.")
+        return True
 
     def _refresh_graph(self, title: str, backlinks: list[str], outgoing: list[str]) -> None:
         self.graph_scene.clear()
