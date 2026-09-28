@@ -4,15 +4,17 @@ import re
 import shutil
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QSize, QTimer, Qt
+from PySide6.QtCore import QEvent, QPoint, QSize, QTimer, Qt
 from PySide6.QtGui import QAction, QBrush, QColor, QCursor, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog,
+    QComboBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QMenu,
@@ -31,7 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.core.search import fuzzy_note_suggestions, search_notes
+from app.core.search import fuzzy_note_results, refresh_search_index, search_notes
 from app.core.vault import Vault
 from app.ui.markdown_editor import MarkdownEditor
 from watchdog.events import FileSystemEventHandler
@@ -413,7 +415,7 @@ class MainWindow(QMainWindow):
     def _position_search_results(self) -> None:
         if not hasattr(self, "search_results"):
             return
-        position = self.search_input.mapToGlobal(QPoint(0, self.search_input.height()))
+        position = self.search_input.mapTo(self, QPoint(0, self.search_input.height()))
         self.search_results.setGeometry(
             position.x(),
             position.y(),
@@ -501,12 +503,29 @@ class MainWindow(QMainWindow):
         search_layout.setSpacing(4)
 
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Search notes or titles...")
+        self.search_input.setPlaceholderText("Search notes or switch to a note...")
         self.search_input.setStyleSheet("QLineEdit { padding: 7px 11px; }")
         self.search_input.textChanged.connect(self.perform_search)
+        self.search_input.installEventFilter(self)
 
-        self.search_results = QListWidget()
-        self.search_results.setParent(self, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.search_tag_filter = QComboBox()
+        self.search_tag_filter.setObjectName("searchTagFilter")
+        self.search_tag_filter.setToolTip("Filter search results by tag")
+        self.search_tag_filter.setMinimumContentsLength(8)
+        self.search_tag_filter.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.search_tag_filter.addItem("All tags", "")
+        self.search_tag_filter.currentIndexChanged.connect(self.perform_search)
+
+        self.search_path_filter = QComboBox()
+        self.search_path_filter.setObjectName("searchPathFilter")
+        self.search_path_filter.setToolTip("Filter search results by folder")
+        self.search_path_filter.setMinimumContentsLength(8)
+        self.search_path_filter.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.search_path_filter.addItem("All paths", "")
+        self.search_path_filter.currentIndexChanged.connect(self.perform_search)
+
+        self.search_results = QListWidget(self)
+        self.search_results.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.search_results.setStyleSheet(
             """
             QListWidget {
@@ -530,6 +549,8 @@ class MainWindow(QMainWindow):
             """
         )
         self.search_results.itemClicked.connect(self._on_search_result_clicked)
+        self.search_results.itemActivated.connect(self._on_search_result_clicked)
+        self.search_results.installEventFilter(self)
         self.search_results.setVisible(False)
         self.search_results.setMaximumHeight(180)
         self.search_results.setAlternatingRowColors(False)
@@ -537,6 +558,12 @@ class MainWindow(QMainWindow):
         self.suggested_titles: list[str] = []
 
         search_layout.addWidget(self.search_input)
+        filter_layout = QHBoxLayout()
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        filter_layout.setSpacing(6)
+        filter_layout.addWidget(self.search_tag_filter, 1)
+        filter_layout.addWidget(self.search_path_filter, 1)
+        search_layout.addLayout(filter_layout)
         top_bar_layout.addWidget(self.search_panel, 1)
 
         self.settings_button = QPushButton()
@@ -868,44 +895,136 @@ class MainWindow(QMainWindow):
         if self.current_note_path is not None and self.current_note_path.exists():
             self._open_note_file(self.current_note_path)
 
-    def perform_search(self) -> None:
+    def _refresh_search_index(self) -> None:
+        if self.vault is None:
+            return
+        refresh_search_index(self.vault.path, self.vault)
+
+        selected_tag = self.search_tag_filter.currentData()
+        selected_path = self.search_path_filter.currentData()
+        self.search_tag_filter.blockSignals(True)
+        self.search_path_filter.blockSignals(True)
+        self.search_tag_filter.clear()
+        self.search_path_filter.clear()
+        self.search_tag_filter.addItem("All tags", "")
+        self.search_path_filter.addItem("All paths", "")
+        tags = sorted({tag for note in self.vault.notes.values() for tag in note.tags}, key=str.lower)
+        paths = sorted(
+            {
+                parent.as_posix()
+                for relative_path in self.vault.notes
+                if (parent := Path(relative_path).parent).as_posix() != "."
+            },
+            key=str.lower,
+        )
+        for tag in tags:
+            self.search_tag_filter.addItem(f"#{tag}", tag)
+        for path in paths:
+            self.search_path_filter.addItem(path, path)
+        tag_index = self.search_tag_filter.findData(selected_tag)
+        path_index = self.search_path_filter.findData(selected_path)
+        self.search_tag_filter.setCurrentIndex(max(0, tag_index))
+        self.search_path_filter.setCurrentIndex(max(0, path_index))
+        self.search_tag_filter.blockSignals(False)
+        self.search_path_filter.blockSignals(False)
+
+    def _add_search_result(self, result: dict[str, str], suggested: bool = False) -> None:
+        title = result.get("title", "Untitled")
+        path = result.get("path", "")
+        snippet = result.get("snippet", "").replace("\n", " ").strip()
+        label = f"Suggested: {title}" if suggested else title
+        item = QListWidgetItem(f"{label}\n{path}\n{snippet}")
+        item.setData(Qt.ItemDataRole.UserRole, path)
+        if suggested:
+            item.setToolTip("Fuzzy title suggestion")
+        self.search_results.addItem(item)
+
+    def perform_search(self, *_args) -> None:
         query = self.search_input.text().strip()
         self.search_results.clear()
         if self.vault is None:
             self.search_results.setVisible(False)
             return
 
-        if not query:
-            self.search_results.clear()
-            self.search_results.setVisible(False)
-            return
-
-        self.suggested_titles = fuzzy_note_suggestions(self.vault.path, query)
-        matches = search_notes(self.vault.path, query)
-
+        tag = self.search_tag_filter.currentData() or ""
+        path = self.search_path_filter.currentData() or ""
+        matches = search_notes(self.vault.path, query, tag=tag, path=path)
+        suggestions = fuzzy_note_results(
+            self.vault.path, query, tag=tag, path=path
+        )
+        self.suggested_titles = [result["title"] for result in suggestions]
+        shown_paths: set[str] = set()
         for result in matches:
-            title = result.get("title", "Untitled")
-            path = result.get("path", "")
-            snippet = result.get("snippet", "")
-            item_text = f"{title}\n{path}\n{snippet}"
-            self.search_results.addItem(item_text)
+            self._add_search_result(result)
+            shown_paths.add(result.get("path", ""))
+        for result in suggestions:
+            if result.get("path") not in shown_paths:
+                self._add_search_result(result, suggested=True)
+                shown_paths.add(result.get("path", ""))
 
         if self.search_results.count() == 0:
-            self.search_results.addItem(f"No results for: {query}")
+            empty_text = f"No results for: {query}" if query else "No notes in this vault"
+            self.search_results.addItem(empty_text)
         self._position_search_results()
         self.search_results.setVisible(True)
+        self.search_results.raise_()
 
     def _on_search_result_clicked(self, item: QListWidgetItem) -> None:
         text = item.text()
-        if not text or text.startswith("No results"):
+        if not text or text.startswith("No results") or text == "No notes in this vault":
             return
-        lines = text.splitlines()
-        if len(lines) < 2:
-            return
-        path = lines[1].strip()
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if not path:
+            lines = text.splitlines()
+            if len(lines) < 2:
+                return
+            path = lines[1].strip()
         if self.vault is not None:
             self._open_note_file(self.vault.path / path)
             self.search_results.setVisible(False)
+
+    def _open_search(self) -> None:
+        self.search_panel.setVisible(True)
+        self.search_input.selectAll()
+        self.perform_search()
+        self.search_input.setFocus()
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API
+        if event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            if watched is self.search_input:
+                if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
+                    if self.search_results.count():
+                        current_row = self.search_results.currentRow()
+                        if current_row < 0:
+                            current_row = -1 if key == Qt.Key.Key_Down else 0
+                        next_row = current_row + (1 if key == Qt.Key.Key_Down else -1)
+                        self.search_results.setCurrentRow(
+                            next_row % self.search_results.count()
+                        )
+                    return True
+                if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                    item = self.search_results.currentItem() or self.search_results.item(0)
+                    if item is not None:
+                        self._on_search_result_clicked(item)
+                    return True
+                if key == Qt.Key.Key_Escape:
+                    self.search_results.setVisible(False)
+                    return True
+            elif watched is self.search_results:
+                if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                    item = self.search_results.currentItem()
+                    if item is not None:
+                        self._on_search_result_clicked(item)
+                    return True
+                if key == Qt.Key.Key_Escape:
+                    self.search_results.setVisible(False)
+                    self.search_input.setFocus()
+                    return True
+                if key == Qt.Key.Key_Up and self.search_results.currentRow() <= 0:
+                    self.search_input.setFocus()
+                    return True
+        return super().eventFilter(watched, event)
 
     def _setup_shortcuts(self) -> None:
         open_vault_action = QAction("Open Vault", self)
@@ -922,6 +1041,11 @@ class MainWindow(QMainWindow):
         new_note_action.setShortcut(QKeySequence("Ctrl+N"))
         new_note_action.triggered.connect(self.new_note)
         self.addAction(new_note_action)
+
+        quick_switcher_action = QAction("Quick Switcher", self)
+        quick_switcher_action.setShortcut(QKeySequence("Ctrl+P"))
+        quick_switcher_action.triggered.connect(self._open_search)
+        self.addAction(quick_switcher_action)
 
     def _on_tree_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         relative_path = item.data(0, Qt.UserRole)
@@ -1276,6 +1400,7 @@ class MainWindow(QMainWindow):
 
         self._add_empty_folder_indicators(root_item)
         self.note_tree.expandAll()
+        self._refresh_search_index()
 
     def _add_empty_folder_indicators(self, item: QTreeWidgetItem) -> None:
         is_directory = bool(item.data(0, VaultTreeWidget.IS_DIRECTORY_ROLE))

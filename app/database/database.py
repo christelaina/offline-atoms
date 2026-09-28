@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from rapidfuzz import process
+
 
 class VaultDatabase:
     def __init__(self, vault_path: str | Path) -> None:
@@ -94,13 +96,20 @@ class VaultDatabase:
                     )
             conn.commit()
 
-    def search(self, query: str) -> list[dict[str, str]]:
+    def search(
+        self, query: str, tag: str = "", path: str = ""
+    ) -> list[dict[str, str]]:
+        filters, filter_values = self._filters(tag, path)
         with sqlite3.connect(self.db_path) as conn:
             if query.strip():
                 try:
+                    clauses = ["notes_fts MATCH ?", *filters]
+                    values = [query, *filter_values]
                     rows = conn.execute(
-                        "SELECT path, title, content FROM notes_fts WHERE notes_fts MATCH ? ORDER BY rank",
-                        (query,),
+                        "SELECT notes.path, notes.title, notes.content "
+                        "FROM notes_fts JOIN notes ON notes.path = notes_fts.path "
+                        f"WHERE {' AND '.join(clauses)} ORDER BY rank",
+                        values,
                     ).fetchall()
                     if rows:
                         return [
@@ -110,11 +119,64 @@ class VaultDatabase:
                 except sqlite3.DatabaseError:
                     pass
 
+            clauses = list(filters)
+            values = list(filter_values)
+            if query.strip():
+                clauses.append(
+                    "(lower(notes.title) LIKE ? OR lower(notes.content) LIKE ? "
+                    "OR EXISTS (SELECT 1 FROM tags AS query_tags "
+                    "WHERE query_tags.path = notes.path AND lower(query_tags.tag) LIKE ?))"
+                )
+                query_pattern = f"%{query.lower()}%"
+                values.extend((query_pattern, query_pattern, query_pattern))
+            where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
             rows = conn.execute(
-                "SELECT path, title, content FROM notes WHERE lower(title) LIKE ? OR lower(content) LIKE ? ORDER BY title",
-                (f"%{query.lower()}%", f"%{query.lower()}%"),
+                f"SELECT notes.path, notes.title, notes.content FROM notes{where} ORDER BY title",
+                values,
             ).fetchall()
             return [{"path": path, "title": title, "snippet": content[:160]} for path, title, content in rows]
+
+    def suggest(
+        self, query: str, limit: int = 10, tag: str = "", path: str = ""
+    ) -> list[dict[str, str]]:
+        filters, filter_values = self._filters(tag, path)
+        where = f" WHERE {' AND '.join(filters)}" if filters else ""
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT notes.path, notes.title, notes.content FROM notes" + where,
+                filter_values,
+            ).fetchall()
+
+        records = [
+            {"path": note_path, "title": title, "snippet": content[:160]}
+            for note_path, title, content in rows
+        ]
+        if not query.strip():
+            return sorted(records, key=lambda record: record["title"].lower())[:limit]
+        if not records:
+            return []
+        matches = process.extract(
+            query, [record["title"] for record in records], limit=limit
+        )
+        return [records[index] for _, _, index in matches]
+
+    @staticmethod
+    def _filters(tag: str, path: str) -> tuple[list[str], list[str]]:
+        clauses: list[str] = []
+        values: list[str] = []
+        if tag:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM tags AS filter_tags "
+                "WHERE filter_tags.path = notes.path AND lower(filter_tags.tag) = lower(?))"
+            )
+            values.append(tag)
+        if path:
+            normalized_path = path.strip("/").replace("\\", "/")
+            clauses.append(
+                "(notes.path = ? OR substr(notes.path, 1, length(?) + 1) = ? || '/')"
+            )
+            values.extend((normalized_path, normalized_path, normalized_path))
+        return clauses, values
 
     def count_notes(self) -> int:
         with sqlite3.connect(self.db_path) as conn:
